@@ -65,6 +65,7 @@ node server.js
 | `test/server.test.js` | 模拟来源失败的缓存保护和代理目标测试。 |
 | `test/road.test.js` | 道路名称分类、并行主辅路、冲突、层级与附近道路匹配测试。 |
 | `test/app.test.js` | 模拟 DOM/高德 SDK 的刷新会话恢复、重试、清除、默认折叠及道路查询回归测试。 |
+| `test/startup.test.js` | 经版本目录软链接启动真实 Node 服务的回归测试；环境不允许目录链接时跳过。 |
 | `README.md` | 简要启动和部署说明。 |
 
 这是原生 JavaScript ES module 项目，没有前端框架和打包依赖。Node 路径和 Worker 路径都要维护：修改解析逻辑改 `parser.js`；修改后端行为时检查 `server.js` 与 `worker.js` 是否都需要改动。`dist/` 是构建产物，不应作为主要编辑入口。
@@ -171,3 +172,4 @@ Worker 构建命令为 `npm run build`，生成 `dist/server/index.js` 和构建
 - 已实现 HTTPS 子路径下的静态资源、API 与高德代理前缀适配，`serviceHost` 不带末尾斜杠；根目录访问继续支持。
 - 已补充通用部署模板与占位 `.env.example`；服务器真实值、SSH 私钥及本地部署暂存不属于发布文件。
 - 本次代码检查：17 项自动化测试通过，Worker 构建与前端、构建产物语法检查通过。发布时必须对最终提交文件及构建产物再次扫描凭据，并记录实际 GitHub 提交与服务器健康检查结果；准备完成不等于部署完成。
+- 部署检查发现 Node 经版本目录软链接启动时，原入口比较未解析真实路径，会直接正常退出而不监听端口；已用 `realpathSync` 修正。新增启动回归测试：本机 17 项通过、该项因 Windows 目录链接权限跳过；须在 Linux 部署环境完成实际启动测试。

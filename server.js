@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { parseLabels } from './parser.js';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -43,4 +44,6 @@ export const server = http.createServer(async (req,res) => {
     json(res,404,{error:'Not found'});
   } catch (e) { console.error('请求处理失败:', e.message); if (!res.headersSent) json(res,500,{error:'服务暂时不可用'}); else res.end(); }
 });
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) server.listen(Number(process.env.PORT || 3000),process.env.HOST || '127.0.0.1',()=>console.log(`Listening on ${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 3000}`));
+let entryPath;
+try { entryPath = process.argv[1] && realpathSync(process.argv[1]); } catch {}
+if (entryPath === fileURLToPath(import.meta.url)) server.listen(Number(process.env.PORT || 3000),process.env.HOST || '127.0.0.1',()=>console.log(`Listening on ${process.env.HOST || '127.0.0.1'}:${server.address().port}`));
