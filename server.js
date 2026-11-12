@@ -29,7 +29,7 @@ async function update() {
 }
 function payload() { return { cameras: cache?.cameras || [], fetchedAt: cache?.fetchedAt || null, source: SOURCE, stale: !!cache && (Date.now() - Date.parse(cache.fetchedAt) > ttl || !!lastError), warning: lastError ? '来源数据更新失败，请稍后重试。' : cache?.invalid ? `有 ${cache.invalid} 条异常记录被忽略，数据可能不完整。` : '', coordinateSystem: '来源坐标系尚未核验' }; }
 function json(res, status, value) { res.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}); res.end(JSON.stringify(value)); }
-const files = { '/': ['public/index.html','text/html; charset=utf-8'], '/app.js':['public/app.js','text/javascript; charset=utf-8'], '/road.js':['public/road.js','text/javascript; charset=utf-8'], '/location.js':['public/location.js','text/javascript; charset=utf-8'], '/style.css':['public/style.css','text/css; charset=utf-8'] };
+const files = { '/': ['public/index.html','text/html; charset=utf-8'], '/app.js':['public/app.js','text/javascript; charset=utf-8'], '/road.js':['public/road.js','text/javascript; charset=utf-8'], '/junction.js':['public/junction.js','text/javascript; charset=utf-8'], '/location.js':['public/location.js','text/javascript; charset=utf-8'], '/style.css':['public/style.css','text/css; charset=utf-8'] };
 export const server = http.createServer(async (req,res) => {
   try {
     const url = new URL(req.url,'http://localhost');

@@ -4,11 +4,13 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { classifyRoad } from '../public/road.js';
 import { gpsToAmap } from '../public/location.js';
+import * as junction from '../public/junction.js';
 
 const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8')
   .replace("import { classifyRoad } from './road.js';", '')
   .replace("import { gpsToAmap } from './location.js';", '')
+  .replace("import { DIRECTIONS, groupJunctions, junctionMarkerHTML } from './junction.js';", '')
   .replace('loadData(); loadMap().then(loaded=>{ if(loaded) locate(); });', '');
 const SESSION_KEY = 'jingtu.amap.session';
 
@@ -29,17 +31,18 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
   }
   for (const match of html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)) {
     const element=new Element(); element.hidden=/\bhidden\b/.test(match[0]);
+    element.checked=/\bchecked\b/.test(match[0]);
     element.attributes['aria-expanded']=match[0].match(/aria-expanded="([^"]+)"/)?.[1];
     elements.set(match[1],element);
   }
   elements.get('radius').value='3';
   let reloads=0, maps=0, requests=0, scripts=0, context;
-  const apiRequests = [];
+  const apiRequests = [], markers = [], clusterPoints = [];
   const amap = {
     Map: class { constructor(){maps++;this.events={};} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} setZoomAndCenter(){} },
     Geocoder: class { getAddress(_position, cb) {requests++; cb('complete',{regeocode:{roads:[{name:'北四环辅路',distance:10}],crosses:[]}});} },
-    Marker: class {}, Circle: class {}, Pixel: class {},
-    MarkerCluster: class {setMap(){} on(){}},
+    Marker: class {constructor(options){this.options=options; markers.push(this);} setMap(map){this.removed=!map;}}, Circle: class {}, Pixel: class {},
+    MarkerCluster: class {constructor(_map,points){clusterPoints.push(points);} setMap(){} on(){}},
   };
   const document = {getElementById:id=>elements.get(id), createElement:()=>new Element(), addEventListener(){}, head:{append(script){
     scripts++;
@@ -49,13 +52,13 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
     });
   }}};
   context=vm.createContext({
-    document, classifyRoad, gpsToAmap, URL, window:{}, navigator:{}, location:{origin:'http://localhost',href:'http://localhost'+prefix,reload(){reloads++;}},
+    document, classifyRoad, gpsToAmap, ...junction, URL, window:{}, navigator:{}, location:{origin:'http://localhost',href:'http://localhost'+prefix,reload(){reloads++;}},
     sessionStorage:{getItem(key){if(blocked)throw Error('disabled');return store.get(key)||null;},setItem(key,value){if(blocked)throw Error('disabled');store.set(key,value);},removeItem(key){if(blocked)throw Error('disabled');store.delete(key);}},
     fetch:async(url,options)=>{apiRequests.push({url,options});return {ok:true,json:async()=>String(url).endsWith('api/config') ? {mapKey:'fake-js-key',securityProxy:proxy} : {cameras:[],fetchedAt:'2026-11-12T00:00:00Z',stale:false}};},
     setTimeout, clearTimeout
   });
   vm.runInContext(source + '\nglobalThis.client={loadMap,clearSecurity,setPanel,showDetail,queueRoadLookup,setCenter,loadData,locate};',context);
-  return {client:context.client,elements,store,context,apiRequests, stats:()=>({reloads,maps,requests,scripts})};
+  return {client:context.client,elements,store,context,apiRequests,markers,clusterPoints, stats:()=>({reloads,maps,requests,scripts})};
 }
 
 test('首次要求输入密钥，加载成功后刷新同标签页自动恢复；清除会移除会话并重载', async()=>{
@@ -196,4 +199,37 @@ test('来源主路及带不确定备注的探头也查询高德，失败保留�
   await new Promise(resolve=>setTimeout(resolve,350));
   assert.match(p.elements.get('detail-body').innerHTML,/高德查询失败或超时/);
   assert.match(p.elements.get('detail-body').innerHTML,/来源名称或描述提到主路/);
+});
+
+test('同路口仅绘制一个紫色方位点，详情可查看各成员，关闭分组恢复原点',async()=>{
+  const p=page({proxy:true}); await p.client.loadMap();
+  vm.runInContext(`
+    geocoder=null;
+    cameras=[
+      {id:'north',name:'甲路与乙街交口北 北向南',lng:116.4,lat:39.9006},
+      {id:'east',name:'甲路与乙街交口东 东向西',lng:116.4008,lat:39.9},
+      {id:'far',name:'远处探头',lng:116.405,lat:39.9}
+    ];
+    roadCache.set(roadKey(cameras[0]),classifyRoad(cameras[0],[],{crosses:[{location:[116.4,39.9],firstRoadName:'甲路',secondRoadName:'乙街'}]}));
+  `,p.context);
+  p.client.setCenter({lng:116.4,lat:39.9},'manual');
+  const marker=p.markers.find(m=>m.options.content?.className==='junction-marker');
+  assert.ok(marker);
+  assert.equal(p.elements.has('junction-radius'),false);
+  assert.equal(p.elements.get('junction-legend').hidden,false);
+  assert.equal(vm.runInContext('junctionGroups.length',p.context),1);
+  assert.deepEqual(p.clusterPoints.flat().map(c=>c.camera.id),['far']);
+  assert.match(marker.options.content.getAttribute('aria-label'),/北侧、东侧/);
+  marker.options.content.events.click({stopPropagation(){}});
+  assert.equal(p.elements.get('detail').open,true);
+  assert.match(p.elements.get('detail-title').textContent,/甲路 × 乙街/);
+  assert.match(p.elements.get('detail-body').innerHTML,/不代表拍摄朝向/);
+  p.elements.get('detail-body').children.find(c=>c.className==='junction-member').events.click();
+  assert.match(p.elements.get('detail-title').textContent,/北向南/);
+  p.elements.get('junction-enabled').checked=false;
+  p.elements.get('junction-enabled').events.change();
+  assert.equal(marker.removed,true);
+  assert.equal(p.elements.get('junction-legend').hidden,true);
+  assert.equal(vm.runInContext('junctionGroups.length',p.context),0);
+  assert.equal(p.clusterPoints.slice(1).flat().length,3);
 });

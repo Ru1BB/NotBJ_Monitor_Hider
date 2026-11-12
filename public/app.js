@@ -1,5 +1,6 @@
 import { classifyRoad } from './road.js';
 import { gpsToAmap } from './location.js';
+import { DIRECTIONS, groupJunctions, junctionMarkerHTML } from './junction.js';
 const $ = id => document.getElementById(id);
 // Keep assets, APIs and the AMap proxy under the same reverse-proxy prefix.
 const appBase = new URL('.', location.href);
@@ -11,6 +12,7 @@ let map, clusters = [], centerMarker, accuracyCircle, currentPosition, center;
 let cameras = [], visible = [], selected = null, choosing = false, loadingMap = false;
 let activeCode = '', activeKey = '', usesProxy = false;
 let locationRequest = 0;
+let junctionMarkers = [], junctionGroups = [], selectedJunction = null, selectedJunctionMembers = [];
 const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const roadLabel = road => road.kind === 'major' ? '主路 / 高速 / 高架（推测）' : road.kind === 'other' ? '辅路 / 地面 / 匝道（推测）' : '道路待确认';
 function distance(a,b) {
@@ -61,10 +63,33 @@ function paintDetail(camera) {
     + '</details><p>来源坐标系尚待核验；附近道路与距离仅作辅助，不能确定实际车道或高架层级。</p>';
 }
 function showDetail(camera) {
+  selectedJunction = null;
   selected = camera.id; priorityCamera = camera;
   renderList(); paintDetail(camera);
   if (!$('detail').open) $('detail').showModal();
   queueRoadLookup();
+}
+function showJunctionDetail(group) {
+  selectedJunction = group.id; selected = null;
+  selectedJunctionMembers = group.members.map(c => c.id);
+  $('detail-title').textContent = group.name;
+  const directions = DIRECTIONS.filter(side => group.sides[side]).map(side => `${side}侧 ${group.sides[side]} 条`).join('、');
+  $('detail-body').innerHTML = `<div class="junction-detail-preview">${junctionMarkerHTML(group)}</div>`
+    + `<p><b>同路口探头 · ${group.members.length} 条记录（推测）</b><br>当前查询范围内，均距这个高德路口中心 ${group.radius} 米以内。</p>`
+    + `<p><b>探头所在方位</b><br>${escapeHtml(directions || '待确认')}${group.unknown ? `；${group.unknown} 条方位待确认` : ''}</p>`
+    + '<p>上北下南、左西右东。紫色方位点表示该侧有来源记录，空心表示尚无匹配记录；方位按坐标相对路口计算，中心 15 米内仅采用来源明确的路口方位。它不代表拍摄朝向或受监控的行驶方向。</p>'
+    + '<p>以下保留每条来源记录；数量不代表已核实的独立设备数。点击可查看通行方向、道路分类和来源详情。</p>';
+  for (const camera of group.members) {
+    const button = document.createElement('button'); button.className = 'junction-member';
+    button.innerHTML = `<b>${escapeHtml(camera.side === '待确认' ? '方位待确认' : camera.side + '侧')} · 距路口 ${Math.round(camera.junctionDistance)} 米</b><span>${escapeHtml(camera.name)}</span>`;
+    button.addEventListener('click', () => showDetail(camera));
+    $('detail-body').append(button);
+  }
+  const note = document.createElement('p');
+  note.textContent = '按附近路口和距离推测分组，尚未实地核验；空心方位不表示没有摄像头。高架上、高速、匝道等明确描述的记录保留单点。';
+  $('detail-body').append(note);
+  renderList();
+  if (!$('detail').open) $('detail').showModal();
 }
 function renderList() {
   $('count').textContent = center ? visible.length : '—';
@@ -87,8 +112,28 @@ function render() {
   if (!map || !window.AMap) return;
   queueRoadLookup();
   clusters.forEach(c => c.setMap(null)); clusters = [];
+  junctionMarkers.forEach(marker => marker.setMap(null)); junctionMarkers = [];
+  const grouped = groupJunctions(visible, $('junction-enabled').checked);
+  junctionGroups = grouped.groups;
+  $('junction-legend').hidden = !junctionGroups.length;
+  $('junction-status').textContent = `当前范围：${junctionGroups.length} 个合并路口 · ${grouped.singles.length} 个独立点。未匹配到路口或归属不清的记录保留单点。`;
+  for (const group of junctionGroups) {
+    const el = document.createElement('button'); el.className = 'junction-marker';
+    const sides = DIRECTIONS.filter(side => group.sides[side]).map(side => side + '侧').join('、');
+    const title = `${group.name}，${group.members.length} 条探头记录；${sides || '方位待确认'}${group.unknown ? '，部分方位待确认' : ''}。方位为位置推测`;
+    el.setAttribute('aria-label', title); el.title = title;
+    el.innerHTML = junctionMarkerHTML(group);
+    el.addEventListener('click', event => { event.stopPropagation(); showJunctionDetail(group); });
+    junctionMarkers.push(new AMap.Marker({position:[group.lng,group.lat],map,content:el,offset:new AMap.Pixel(-32,-32),zIndex:140,title}));
+  }
+  if (selectedJunction && $('detail').open) {
+    const group = junctionGroups.find(g => g.id === selectedJunction)
+      || junctionGroups.find(g => g.members.filter(c => selectedJunctionMembers.includes(c.id)).length >= 2);
+    if (group) showJunctionDetail(group);
+    else { selectedJunction = null; $('detail').close(); }
+  }
   for (const kind of ['major','other','unknown']) {
-    const group=visible.filter(c => c.road.kind === kind); if (!group.length) continue;
+    const group=grouped.singles.filter(c => c.road.kind === kind); if (!group.length) continue;
     const points=group.map(c=>({lnglat:[c.lng,c.lat],camera:c}));
     const color={major:'#d94747',other:'#d98a54',unknown:'#829188'}[kind];
     const cluster=new AMap.MarkerCluster(map,points,{gridSize:60,renderMarker(context){
@@ -194,9 +239,9 @@ async function loadMap(securityCode = '') {
     }
     activeKey=config.mapKey; $('security-form').hidden=true;
     await loadSdk(config.mapKey);
-    if(map) {clusters.forEach(c=>c.setMap(null)); clusters=[]; map.destroy(); centerMarker=null; accuracyCircle=null;}
-    geocoder = new AMap.Geocoder({radius:100, extensions:'all'});
-    map=new AMap.Map('map',{zoom:10,center:[116.397428,39.90923],viewMode:'2D'});
+    if(map) {clusters.forEach(c=>c.setMap(null)); clusters=[]; junctionMarkers.forEach(m=>m.setMap(null)); junctionMarkers=[]; map.destroy(); centerMarker=null; accuracyCircle=null;}
+    geocoder = new AMap.Geocoder({radius:300, extensions:'all'});
+    map=new AMap.Map('map',{zoom:10,center:[116.397428,39.90923],viewMode:'2D',rotation:0,rotationEnable:false,pitchEnable:false});
     map.on('click',e=>{ if(choosing) { choosing=false; $('map-instruction').hidden=true; setCenter({lng:e.lnglat.lng,lat:e.lnglat.lat},'manual'); } });
     if (!usesProxy) saveCode(config.mapKey,code);
     if(center) setCenter(center,'manual'); else render();
@@ -235,6 +280,7 @@ for (const name of ['list','settings']) {
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')setPanel('',false);});
 $('radius').addEventListener('change',render);
+$('junction-enabled').addEventListener('change',render);
 $('refresh').addEventListener('click',()=>loadData(true));
 $('locate').addEventListener('click',locate);
 $('recenter').addEventListener('click',()=>{ if(currentPosition) { ++locationRequest; choosing=false; $('map-instruction').hidden=true; setCenter(currentPosition,'gps',currentPosition.accuracy); } else locate(); });

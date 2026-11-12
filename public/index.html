@@ -21,12 +21,19 @@
       <label for="radius">附近范围</label>
       <div class="control-row"><select id="radius"><option value="1">1 公里</option><option value="3" selected>3 公里</option><option value="5">5 公里</option><option value="10">10 公里</option></select><button id="refresh" class="button">刷新数据</button></div>
       <button id="select" class="button full-width">在地图上选择查询中心</button>
+      <div class="junction-settings">
+        <label class="junction-toggle"><input id="junction-enabled" type="checkbox" checked>合并同一路口的探头</label>
+        <p>分组条件：距同一路口中心 100 米以内，且至少两条记录。</p>
+        <p>紫色罗盘为合并路口，中央为记录数，亮起方位为探头所在侧。上北下南；空心方位仅表示尚无匹配记录。</p>
+        <p id="junction-status" role="status">附近路口查询完成后自动分组；归属不清时保留单点。</p>
+      </div>
       <details><summary>图例与道路判断</summary><div class="legend"><p><i class="dot current"></i>查询中心</p><p><i class="dot major"></i>主路 / 高速 / 高架（推测）</p><p><i class="dot other"></i>辅路 / 地面 / 匝道（推测）</p><p><i class="dot unknown"></i>道路待确认</p></div><p>点击探头查看来源描述、高德附近道路和路口信息。附近道路不能证明探头所属车道或高架层级。</p><p id="road-status">高德道路辅助查询等待地图加载</p></details>
       <details><summary>定位与数据说明</summary><p id="location-time"></p><p id="data-time">正在获取数据</p><p id="notice" role="status"></p><p>数据来自 <a href="https://www.jinjing365.com/" target="_blank" rel="noopener noreferrer">进京365 ↗</a>。距离为近似直线距离，来源坐标系尚未核验。</p><p>位置用于本机距离计算；高德地图、GPS 坐标转换和道路查询会访问高德服务。在线转换失败时，北京周边位置会使用本地近似转换并显示提示。</p><p>当前提供探头地图，尚未实现路线规划和实时导航。</p></details>
       <details><summary>地图密钥</summary><p id="credential-status">手动输入的安全密钥只保留在当前标签页的会话存储中，刷新后自动使用。</p><button id="clear-security" class="button full-width">清除密钥并重新输入</button></details>
     </div>
   </section>
   <div class="map-tools"><button id="locate" class="tool" title="重新定位" aria-label="重新定位">⌖</button><button id="recenter" class="tool" title="回到当前位置" aria-label="回到当前位置">↗</button></div>
+  <div id="junction-legend" class="junction-map-legend" hidden><i></i><span>紫色路口 · 亮点为探头所在侧<br>上北下南 · 空心为暂无匹配记录</span></div>
   <div id="map-instruction" class="map-instruction" hidden>点击地图选择查询中心 <button id="cancel-select">取消</button></div>
   <div class="map-status" role="status"><span class="live-dot"></span><span id="location-status">正在加载地图…</span><span id="data-indicator" hidden>数据异常 · 在设置中查看</span></div>
   <form id="security-form" class="map-overlay" hidden>

@@ -1,3 +1,4 @@
+import { normalizeIntersections } from './junction.js';
 // Nearby roads are evidence, never proof of the road or vertical level carrying a camera.
 const uncertain = /待确认|不确定|疑似|可能|推测|存疑/;
 const junction = /交口|交叉|附近|旁|下方|下面|桥下|出口|入口|收费站/;
@@ -51,5 +52,5 @@ export function classifyRoad(camera, roads = [], info = {}) {
     else if (/高架上|高架桥上|高架路上/.test(text)) level = '高架上（来源描述，待核验）';
   }
   const crossings = (Array.isArray(info.crosses) ? info.crosses : []).slice(0, 3).map(c => [c?.firstRoadName, c?.secondRoadName].filter(n => typeof n === 'string' && n).join(' × ')).filter(Boolean);
-  return {kind, reason, level, nearbyRoads: nearbyRoads.slice(0, 5), crossings, address: typeof info.formattedAddress === 'string' ? info.formattedAddress : ''};
+  return {kind, reason, level, nearbyRoads: nearbyRoads.slice(0, 5), crossings, intersections: normalizeIntersections(info), address: typeof info.formattedAddress === 'string' ? info.formattedAddress : ''};
 }
