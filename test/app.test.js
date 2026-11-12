@@ -37,12 +37,11 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
   }
   elements.get('radius').value='3';
   let reloads=0, maps=0, requests=0, scripts=0, context;
-  const apiRequests = [], markers = [], clusterPoints = [];
+  const apiRequests = [], markers = [];
   const amap = {
-    Map: class { constructor(){maps++;this.events={};} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} setZoomAndCenter(){} },
+    Map: class { constructor(_id,options){maps++;this.events={};this.zoom=options.zoom;} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} setZoomAndCenter(zoom){this.zoom=zoom;} getZoom(){return this.zoom;} },
     Geocoder: class { getAddress(_position, cb) {requests++; cb('complete',{regeocode:{roads:[{name:'北四环辅路',distance:10}],crosses:[]}});} },
     Marker: class {constructor(options){this.options=options; markers.push(this);} setMap(map){this.removed=!map;}}, Circle: class {}, Pixel: class {},
-    MarkerCluster: class {constructor(_map,points){clusterPoints.push(points);} setMap(){} on(){}},
   };
   const document = {getElementById:id=>elements.get(id), createElement:()=>new Element(), addEventListener(){}, head:{append(script){
     scripts++;
@@ -58,7 +57,7 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
     setTimeout, clearTimeout
   });
   vm.runInContext(source + '\nglobalThis.client={loadMap,clearSecurity,setPanel,showDetail,queueRoadLookup,setCenter,loadData,locate};',context);
-  return {client:context.client,elements,store,context,apiRequests,markers,clusterPoints, stats:()=>({reloads,maps,requests,scripts})};
+  return {client:context.client,elements,store,context,apiRequests,markers, stats:()=>({reloads,maps,requests,scripts})};
 }
 
 test('首次要求输入密钥，加载成功后刷新同标签页自动恢复；清除会移除会话并重载', async()=>{
@@ -136,7 +135,7 @@ test('SDK 网络失败后保留本页输入供重试，错误提示可见，重�
   assert.equal(await failed.client.loadMap('fake-code'),false);
   assert.equal(failed.elements.get('map-error').hidden,false);
   failed.context.document.head.append=script=>queueMicrotask(()=>{
-    failed.context.window.AMap={Map:class {on(){}}, Geocoder:class {}};
+    failed.context.window.AMap={Map:class {on(){} getZoom(){return 10;}}, Geocoder:class {}};
     failed.context.AMap=failed.context.window.AMap; script.onload();
   });
   assert.equal(await failed.client.loadMap(),true);
@@ -218,7 +217,7 @@ test('同路口仅绘制一个紫色方位点，详情可查看各成员，关�
   assert.equal(p.elements.has('junction-radius'),false);
   assert.equal(p.elements.get('junction-legend').hidden,false);
   assert.equal(vm.runInContext('junctionGroups.length',p.context),1);
-  assert.deepEqual(p.clusterPoints.flat().map(c=>c.camera.id),['far']);
+  assert.equal(p.markers.filter(m=>!m.removed&&m.options.content?.className==='camera-marker').length,1);
   assert.match(marker.options.content.getAttribute('aria-label'),/北侧、东侧/);
   marker.options.content.events.click({stopPropagation(){}});
   assert.equal(p.elements.get('detail').open,true);
@@ -231,5 +230,41 @@ test('同路口仅绘制一个紫色方位点，详情可查看各成员，关�
   assert.equal(marker.removed,true);
   assert.equal(p.elements.get('junction-legend').hidden,true);
   assert.equal(vm.runInContext('junctionGroups.length',p.context),0);
-  assert.equal(p.clusterPoints.slice(1).flat().length,3);
+  assert.equal(p.markers.filter(m=>!m.removed&&m.options.content?.className==='camera-marker').length,3);
+});
+
+test('放大到 16 级展开路口小点，缩小恢复，不依赖蓝色数字聚合插件或重复查询',async()=>{
+  const p=page({proxy:true}); await p.client.loadMap();
+  vm.runInContext(`
+    geocoder=null;
+    cameras=[
+      {id:'north',name:'甲路与乙街交口北 北向南',lng:116.4,lat:39.9006},
+      {id:'east',name:'甲路与乙街交口东 东向西',lng:116.4008,lat:39.9},
+      {id:'far',name:'远处主路探头',lng:116.405,lat:39.9}
+    ];
+    roadCache.set(roadKey(cameras[0]),classifyRoad(cameras[0],[],{crosses:[{location:[116.4,39.9],firstRoadName:'甲路',secondRoadName:'乙街'}]}));
+  `,p.context);
+  p.client.setCenter({lng:116.4,lat:39.9},'manual');
+  const active=kind=>p.markers.filter(m=>!m.removed&&m.options.content?.className===kind);
+  assert.equal(active('junction-marker').length,1);
+  vm.runInContext('map.zoom=15.99;map.events.zoomend();',p.context);
+  assert.equal(active('junction-marker').length,1);
+  const oldJunction=active('junction-marker')[0],oldDot=active('camera-marker')[0];
+  vm.runInContext('map.zoom=16;map.events.zoomend();',p.context);
+  assert.equal(oldJunction.removed,true);
+  assert.equal(oldDot.removed,true);
+  assert.equal(active('junction-marker').length,0);
+  assert.equal(active('camera-marker').length,3);
+  assert.equal(p.elements.get('junction-legend').hidden,true);
+  assert.match(p.elements.get('junction-status').textContent,/显示 3 个探头小点/);
+  const north=active('camera-marker').find(m=>m.options.title.includes('北向南'));
+  north.options.content.events.click({stopPropagation(){}});
+  assert.match(p.elements.get('detail-title').textContent,/北向南/);
+  assert.match(active('camera-marker').find(m=>m.options.title.includes('远处主路')).options.content.innerHTML,/#d94747/);
+  vm.runInContext('map.zoom=15;map.events.zoomend();',p.context);
+  assert.equal(active('junction-marker').length,1);
+  assert.equal(active('camera-marker').length,1);
+  assert.equal(p.elements.get('junction-legend').hidden,false);
+  assert.equal(p.stats().requests,0);
+  assert.doesNotMatch(source,/MarkerCluster/);
 });

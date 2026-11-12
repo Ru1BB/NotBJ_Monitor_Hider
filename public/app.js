@@ -6,9 +6,10 @@ const $ = id => document.getElementById(id);
 const appBase = new URL('.', location.href);
 const appUrl = path => new URL(path, appBase).href;
 const SESSION_KEY = 'jingtu.amap.session';
+const JUNCTION_EXPAND_ZOOM = 16;
 const roadCache = new Map(), roadPending = new Set();
 let geocoder, roadQueueRunning = false, roadRequests = 0, priorityCamera = null;
-let map, clusters = [], centerMarker, accuracyCircle, currentPosition, center;
+let map, cameraMarkers = [], centerMarker, accuracyCircle, currentPosition, center;
 let cameras = [], visible = [], selected = null, choosing = false, loadingMap = false;
 let activeCode = '', activeKey = '', usesProxy = false;
 let locationRequest = 0;
@@ -111,20 +112,27 @@ function render() {
   renderList();
   if (!map || !window.AMap) return;
   queueRoadLookup();
-  clusters.forEach(c => c.setMap(null)); clusters = [];
+  renderMapMarkers();
+}
+function renderMapMarkers() {
+  if (!map || !window.AMap) return;
+  cameraMarkers.forEach(marker => marker.setMap(null)); cameraMarkers = [];
   junctionMarkers.forEach(marker => marker.setMap(null)); junctionMarkers = [];
   const grouped = groupJunctions(visible, $('junction-enabled').checked);
   junctionGroups = grouped.groups;
-  $('junction-legend').hidden = !junctionGroups.length;
-  $('junction-status').textContent = `当前范围：${junctionGroups.length} 个合并路口 · ${grouped.singles.length} 个独立点。未匹配到路口或归属不清的记录保留单点。`;
-  for (const group of junctionGroups) {
+  const expanded = map.getZoom() >= JUNCTION_EXPAND_ZOOM;
+  $('junction-legend').hidden = expanded || !junctionGroups.length;
+  $('junction-status').textContent = expanded
+    ? `已放大：显示 ${visible.length} 个探头小点；缩小后显示路口分组。`
+    : `当前范围：${junctionGroups.length} 个合并路口 · ${grouped.singles.length} 个独立点。放大可展开路口内的探头。`;
+  for (const group of expanded ? [] : junctionGroups) {
     const el = document.createElement('button'); el.className = 'junction-marker';
     const sides = DIRECTIONS.filter(side => group.sides[side]).map(side => side + '侧').join('、');
     const title = `${group.name}，${group.members.length} 条探头记录；${sides || '方位待确认'}${group.unknown ? '，部分方位待确认' : ''}。方位为位置推测`;
     el.setAttribute('aria-label', title); el.title = title;
     el.innerHTML = junctionMarkerHTML(group);
     el.addEventListener('click', event => { event.stopPropagation(); showJunctionDetail(group); });
-    junctionMarkers.push(new AMap.Marker({position:[group.lng,group.lat],map,content:el,offset:new AMap.Pixel(-32,-32),zIndex:140,title}));
+    junctionMarkers.push(new AMap.Marker({position:[group.lng,group.lat],map,content:el,offset:new AMap.Pixel(-18,-18),zIndex:140,title}));
   }
   if (selectedJunction && $('detail').open) {
     const group = junctionGroups.find(g => g.id === selectedJunction)
@@ -132,16 +140,14 @@ function render() {
     if (group) showJunctionDetail(group);
     else { selectedJunction = null; $('detail').close(); }
   }
-  for (const kind of ['major','other','unknown']) {
-    const group=grouped.singles.filter(c => c.road.kind === kind); if (!group.length) continue;
-    const points=group.map(c=>({lnglat:[c.lng,c.lat],camera:c}));
-    const color={major:'#d94747',other:'#d98a54',unknown:'#829188'}[kind];
-    const cluster=new AMap.MarkerCluster(map,points,{gridSize:60,renderMarker(context){
-      const el=document.createElement('div'); el.style.cssText=`width:20px;height:20px;border:3px solid white;border-radius:50%;background:${color};box-shadow:0 2px 6px #0005`;
-      context.marker.setContent(el); context.marker.setOffset(new AMap.Pixel(-10,-10));
-    }});
-    cluster.on('click', e=>{ if(e.clusterData?.length===1) showDetail(e.clusterData[0].camera); else if(e.clusterData?.length>1) map.setZoomAndCenter(Math.min(map.getZoom()+2,20),e.lnglat); });
-    clusters.push(cluster);
+  for (const camera of expanded ? visible : grouped.singles) {
+    const color={major:'#d94747',other:'#d98a54',unknown:'#829188'}[camera.road.kind] || '#829188';
+    const el=document.createElement('button'); el.className='camera-marker';
+    const title = `${camera.name}，${roadLabel(camera.road)}`;
+    el.title=title; el.setAttribute('aria-label',title);
+    el.innerHTML=`<span class="camera-dot" style="background:${color}" aria-hidden="true"></span>`;
+    el.addEventListener('click',event=>{event.stopPropagation();showDetail(camera);});
+    cameraMarkers.push(new AMap.Marker({position:[camera.lng,camera.lat],map,content:el,offset:new AMap.Pixel(-12,-12),zIndex:130,title}));
   }
 }
 async function queueRoadLookup() {
@@ -212,7 +218,7 @@ async function loadSdk(key) {
       if (error) { script.remove(); reject(error); } else resolve();
     };
     const timer=setTimeout(()=>finish(Error('地图加载超时，请检查网络后重试。')),15000);
-    script.src=`https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(key)}&plugin=AMap.MarkerCluster,AMap.Geocoder`;
+    script.src=`https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(key)}&plugin=AMap.Geocoder`;
     script.onload=()=>finish(window.AMap ? null : Error('地图 SDK 加载失败，请检查 Key 与安全密钥。'));
     script.onerror=()=>finish(Error('地图 SDK 加载失败，请检查网络后重试。'));
     document.head.append(script);
@@ -239,9 +245,10 @@ async function loadMap(securityCode = '') {
     }
     activeKey=config.mapKey; $('security-form').hidden=true;
     await loadSdk(config.mapKey);
-    if(map) {clusters.forEach(c=>c.setMap(null)); clusters=[]; junctionMarkers.forEach(m=>m.setMap(null)); junctionMarkers=[]; map.destroy(); centerMarker=null; accuracyCircle=null;}
+    if(map) {cameraMarkers.forEach(m=>m.setMap(null)); cameraMarkers=[]; junctionMarkers.forEach(m=>m.setMap(null)); junctionMarkers=[]; map.destroy(); centerMarker=null; accuracyCircle=null;}
     geocoder = new AMap.Geocoder({radius:300, extensions:'all'});
     map=new AMap.Map('map',{zoom:10,center:[116.397428,39.90923],viewMode:'2D',rotation:0,rotationEnable:false,pitchEnable:false});
+    map.on('zoomend',renderMapMarkers);
     map.on('click',e=>{ if(choosing) { choosing=false; $('map-instruction').hidden=true; setCenter({lng:e.lnglat.lng,lat:e.lnglat.lat},'manual'); } });
     if (!usesProxy) saveCode(config.mapKey,code);
     if(center) setCenter(center,'manual'); else render();
