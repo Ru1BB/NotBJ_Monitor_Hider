@@ -2,6 +2,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { parseLabels } from './parser.js';
+import { amapContentType } from './amap-proxy.js';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -28,7 +29,7 @@ async function update() {
 }
 function payload() { return { cameras: cache?.cameras || [], fetchedAt: cache?.fetchedAt || null, source: SOURCE, stale: !!cache && (Date.now() - Date.parse(cache.fetchedAt) > ttl || !!lastError), warning: lastError ? '来源数据更新失败，请稍后重试。' : cache?.invalid ? `有 ${cache.invalid} 条异常记录被忽略，数据可能不完整。` : '', coordinateSystem: '来源坐标系尚未核验' }; }
 function json(res, status, value) { res.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}); res.end(JSON.stringify(value)); }
-const files = { '/': ['public/index.html','text/html; charset=utf-8'], '/app.js':['public/app.js','text/javascript; charset=utf-8'], '/road.js':['public/road.js','text/javascript; charset=utf-8'], '/style.css':['public/style.css','text/css; charset=utf-8'] };
+const files = { '/': ['public/index.html','text/html; charset=utf-8'], '/app.js':['public/app.js','text/javascript; charset=utf-8'], '/road.js':['public/road.js','text/javascript; charset=utf-8'], '/location.js':['public/location.js','text/javascript; charset=utf-8'], '/style.css':['public/style.css','text/css; charset=utf-8'] };
 export const server = http.createServer(async (req,res) => {
   try {
     const url = new URL(req.url,'http://localhost');
@@ -38,7 +39,10 @@ export const server = http.createServer(async (req,res) => {
     if (url.pathname.startsWith('/_AMapService/')) {
       if (!process.env.AMAP_SECURITY_CODE || !['GET','POST'].includes(req.method)) return json(res,404,{error:'Not found'});
       const target = new URL('https://restapi.amap.com/'); target.pathname = '/' + url.pathname.slice('/_AMapService/'.length); target.search = url.search; target.searchParams.set('jscode',process.env.AMAP_SECURITY_CODE);
-      const upstream = await fetch(target,{method:req.method,signal:AbortSignal.timeout(12000)}); res.writeHead(upstream.status,{'Content-Type':upstream.headers.get('content-type') || 'application/json','Cache-Control':'no-store'}); return res.end(Buffer.from(await upstream.arrayBuffer()));
+      const upstream = await fetch(target,{method:req.method,signal:AbortSignal.timeout(12000)});
+      const body = Buffer.from(await upstream.arrayBuffer());
+      res.writeHead(upstream.status,{'Content-Type':amapContentType(url,upstream.headers.get('content-type'),body),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
+      return res.end(body);
     }
     if (req.method === 'GET' && files[url.pathname]) { const [file,type] = files[url.pathname]; res.writeHead(200,{'Content-Type':type,'X-Content-Type-Options':'nosniff'}); return res.end(await readFile(path.join(root,file))); }
     json(res,404,{error:'Not found'});

@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { classifyRoad } from '../public/road.js';
+import { gpsToAmap } from '../public/location.js';
 
 const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8')
   .replace("import { classifyRoad } from './road.js';", '')
+  .replace("import { gpsToAmap } from './location.js';", '')
   .replace('loadData(); loadMap().then(loaded=>{ if(loaded) locate(); });', '');
 const SESSION_KEY = 'jingtu.amap.session';
 
@@ -34,7 +36,7 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
   let reloads=0, maps=0, requests=0, scripts=0, context;
   const apiRequests = [];
   const amap = {
-    Map: class { constructor(){maps++;} on(){} destroy(){} remove(){} setZoomAndCenter(){} },
+    Map: class { constructor(){maps++;this.events={};} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} setZoomAndCenter(){} },
     Geocoder: class { getAddress(_position, cb) {requests++; cb('complete',{regeocode:{roads:[{name:'北四环辅路',distance:10}],crosses:[]}});} },
     Marker: class {}, Circle: class {}, Pixel: class {},
     MarkerCluster: class {setMap(){} on(){}},
@@ -47,12 +49,12 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
     });
   }}};
   context=vm.createContext({
-    document, classifyRoad, URL, window:{}, navigator:{}, location:{origin:'http://localhost',href:'http://localhost'+prefix,reload(){reloads++;}},
+    document, classifyRoad, gpsToAmap, URL, window:{}, navigator:{}, location:{origin:'http://localhost',href:'http://localhost'+prefix,reload(){reloads++;}},
     sessionStorage:{getItem(key){if(blocked)throw Error('disabled');return store.get(key)||null;},setItem(key,value){if(blocked)throw Error('disabled');store.set(key,value);},removeItem(key){if(blocked)throw Error('disabled');store.delete(key);}},
     fetch:async(url,options)=>{apiRequests.push({url,options});return {ok:true,json:async()=>String(url).endsWith('api/config') ? {mapKey:'fake-js-key',securityProxy:proxy} : {cameras:[],fetchedAt:'2026-11-12T00:00:00Z',stale:false}};},
     setTimeout, clearTimeout
   });
-  vm.runInContext(source + '\nglobalThis.client={loadMap,clearSecurity,setPanel,showDetail,queueRoadLookup,setCenter,loadData};',context);
+  vm.runInContext(source + '\nglobalThis.client={loadMap,clearSecurity,setPanel,showDetail,queueRoadLookup,setCenter,loadData,locate};',context);
   return {client:context.client,elements,store,context,apiRequests, stats:()=>({reloads,maps,requests,scripts})};
 }
 
@@ -70,6 +72,48 @@ test('首次要求输入密钥，加载成功后刷新同标签页自动恢复�
   assert.equal(refreshed.store.has(SESSION_KEY),false);
   assert.equal(refreshed.stats().reloads,1);
   assert.equal(await page({store:refreshed.store}).client.loadMap(),false);
+});
+
+test('坐标转换服务失败仍显示附近位置，回到当前位置保留近似转换提示', async()=>{
+  const p=page({proxy:true}); await p.client.loadMap();
+  p.context.AMap.convertFrom=(_point,_type,cb)=>cb('error',undefined);
+  p.context.navigator.geolocation={getCurrentPosition(success){success({coords:{longitude:116.404,latitude:39.915,accuracy:20}});}};
+  p.client.locate();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(p.elements.get('location-status').textContent,/当前位置.*近似转换/);
+  assert.match(p.elements.get('location-time').textContent,/不包含转换误差/);
+  assert.ok(Math.abs(vm.runInContext('center.lng',p.context)-116.41024449916938)<1e-8);
+  p.elements.get('recenter').events.click();
+  assert.match(p.elements.get('location-status').textContent,/近似转换/);
+});
+
+test('连续定位与手动选点不被旧的转换回调覆盖', async()=>{
+  const p=page({proxy:true}); await p.client.loadMap();
+  const conversions=[];
+  p.context.AMap.convertFrom=(_point,_type,cb)=>conversions.push(cb);
+  p.context.navigator.geolocation={getCurrentPosition(success){success({coords:{longitude:116.404,latitude:39.915,accuracy:20}});}};
+  p.client.locate(); p.client.locate();
+  conversions[1]('complete',{locations:[{lng:116.42,lat:39.92}]});
+  await new Promise(resolve=>setImmediate(resolve));
+  conversions[0]('complete',{locations:[{lng:116.41,lat:39.91}]});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(vm.runInContext('center.lng',p.context),116.42);
+  p.client.locate();
+  p.elements.get('select').events.click();
+  vm.runInContext('map.events.click({lnglat:{lng:116.5,lat:39.9}})',p.context);
+  conversions[2]('complete',{locations:[{lng:116.43,lat:39.93}]});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(vm.runInContext('center.lng',p.context),116.5);
+  assert.equal(p.elements.get('location-status').textContent,'以手动选点查询');
+});
+
+test('拒绝定位时不调用转换且保留明确提示', async()=>{
+  const p=page({proxy:true}); await p.client.loadMap();
+  p.context.AMap.convertFrom=()=>assert.fail('不应转换');
+  p.context.navigator.geolocation={getCurrentPosition(_success,error){error({code:1});}};
+  p.client.locate();
+  assert.match(p.elements.get('location-status').textContent,/未允许定位/);
+  assert.equal(vm.runInContext('center',p.context),undefined);
 });
 
 test('不同 Key 不复用旧密钥，损坏或被禁用的会话存储不阻止手动加载',async()=>{

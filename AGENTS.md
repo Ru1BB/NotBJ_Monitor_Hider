@@ -55,16 +55,20 @@ node server.js
 | `public/index.html` | 页面结构、地图/列表/密钥输入界面。 |
 | `public/style.css` | 页面样式和移动端响应式布局。 |
 | `public/app.js` | 获取配置和探头、地图加载、定位、距离计算、道路查询队列、聚合标记、列表和详情。 |
+| `public/location.js` | GPS 在线转换、5 秒超时及北京周边本地近似转换降级。 |
 | `public/road.js` | 按来源名称、描述和高德附近道路信息推测道路类别及判断依据。 |
 | `parser.js` | 安全解析来源 `LabelsData`，校验并规范化探头记录。 |
+| `amap-proxy.js` | Node/Worker 共用的高德 JSONP 响应类型校验与修正。 |
 | `server.js` | Node HTTP 服务、数据读取与内存缓存、API、静态文件和高德代理。 |
 | `worker.js` | Worker 运行时的同类后端实现；与 Node 后端有重复逻辑。 |
 | `build.mjs` | 将解析器、Worker 和静态资源合并，生成 `dist/server/index.js`。 |
 | `.openai/hosting.json` | 现有 Sites 构建配置；站点当前状态未验证。 |
 | `test/parser.test.js` | 真实格式样例、字段、恶意表达式和无效数据测试。 |
 | `test/server.test.js` | 模拟来源失败的缓存保护和代理目标测试。 |
+| `test/amap-proxy.test.js` | Node/Worker 的 JSONP MIME、回调执行及异常响应回归测试。 |
 | `test/road.test.js` | 道路名称分类、并行主辅路、冲突、层级与附近道路匹配测试。 |
 | `test/app.test.js` | 模拟 DOM/高德 SDK 的刷新会话恢复、重试、清除、默认折叠及道路查询回归测试。 |
+| `test/location.test.js` | 在线坐标结果、失败降级、无效坐标、超时及迟到回调回归测试。 |
 | `test/startup.test.js` | 经版本目录软链接启动真实 Node 服务的回归测试；环境不允许目录链接时跳过。 |
 | `README.md` | 简要启动和部署说明。 |
 
@@ -75,7 +79,7 @@ node server.js
 1. 浏览器并行请求 `GET /api/config` 和 `GET /api/cameras`。
 2. 后端在无缓存或缓存过期时访问 `https://www.jinjing365.com/index.asp`，优先按响应声明编码解码，没有声明则按 UTF-8 解码。
 3. `parseLabels()` 定位 `LabelsData`，使用受限字面量解析器处理单引号、无引号属性、尾随逗号和 `icon` 引用，**不执行来源页面 JavaScript**。
-4. 后端校验记录并返回全部有效探头及缓存状态。浏览器获取定位、通过高德 `convertFrom` 转换 GPS 坐标，或由用户在地图选点。
+4. 后端校验记录并返回全部有效探头及缓存状态。浏览器获取定位、通过高德 `convertFrom` 转换 GPS 坐标，或由用户在地图选点。在线转换失败时的本地近似转换边界见第 13 节。
 5. 前端 `distance()` 用球面距离公式计算近似直线距离，`render()` 按当前半径筛选、排序并更新列表及标记聚合。地图拖动不会改变查询中心。
 
 来源记录的主要映射：
@@ -177,3 +181,25 @@ Worker 构建命令为 `npm run build`，生成 `dist/server/index.js` 和构建
 - 高德 JS API Key 与安全密钥仅存于服务器受限环境文件，已核验 root:root/0600；源码与构建产物经过凭据扫描。公开配置仅返回 JS Key 与 `securityProxy:true`，未返回安全密钥。真实 JS SDK 已无需输入密钥即可绘制底图。
 - 外网 HTTPS 验证：首页入口、地图页面、app/road/style 资源均返回 200；探头接口读取 6337 条记录，无 warning、非旧缓存。测试用直接 REST 逆编码调用返回 `USERKEY_PLAT_NOMATCH`，不能代替 JS SDK 代理服务验收；真实高德道路查询结果尚未完成浏览器验收，不把该次直接请求失败当作底图失败。
 - 浏览器预览已验证底图，定位出现超时；未验证实地定位、道路准确率和完整导航。当前仍未实现路线规划与实时导航。服务器地址、SSH 资料与私密运维记录保留在仓库之外。
+
+## 12. 独立域名入口（2026-11-12）
+
+- 京途现通过 `hider.7355608.site` 的根路径访问；HTTP 与 HTTPS 均直接返回页面（200），HTTP 不强制跳转。首页京途卡片的地址与按钮已改为该域名，按钮使用 HTTPS。
+- 域名由 Nginx 转发到原 `127.0.0.1:9178` 服务；高德代理与服务器环境配置保持不变。旧 `/jingtu/` 路径仍可用。
+- 已签发独立域名证书，当前有效期至 2027-02-10，纳入已有证书续期任务。外网已验证两种协议的首页、道路模块与 `securityProxy:true` 配置；本次没有修改应用逻辑，也未重复实测地图、定位和道路查询。浏览器定位应使用 HTTPS。
+- 该次变更为服务器 Nginx 和导航页配置变更，私密运维脚本位于忽略的 `.deployment/`，未进入公开源码。
+
+## 13. 定位转换失败恢复（2026-11-12）
+
+- 原定位流程在 `convertFrom` 失败时直接中止，缺少超时与异常处理。现仍优先使用高德结果；错误、无效结果、SDK 异常或 5 秒未回调时，对经度 115–118、纬度 39–42 的位置使用本地 WGS84 → GCJ-02 近似转换，界面及定位说明标明降级。范围外仍提示重试或手动选点，无效浏览器坐标不会转换，也不将原始 GPS 当作高德坐标使用。显示的定位精度不包含转换误差。
+- `public/location.js` 算法改编自 MIT 许可的 `wandergis/coordtransform`，许可保留于 `THIRD_PARTY_NOTICES.md` 并复制至 `dist/`。Node 静态路由和 Worker 构建均须包含新增模块。
+- 定位请求使用序号隔离，旧的定位/转换回调不会覆盖新的定位、手动选点或回到当前位置操作；回到当前位置保留近似转换提示。
+- 本次本地测试共 25 项，24 项通过，1 项 Windows 目录链接权限相关测试跳过；Worker 构建和 JavaScript 语法检查通过。测试使用模拟 SDK，未证明生产环境高德转换失败的具体原因，也未验证实地转换误差。本次未推送或部署。
+
+## 14. 高德 JSONP MIME 修复（2026-11-12）
+
+- 经授权只读核验线上代理：固定测试坐标携带 `platform=JS&s=rsv3` 可成功转换。缺少 `s=rsv3` 时返回的平台不匹配错误，不能作为 SDK 使用错误 Key 的证据。
+- 官方 SDK 源码确认 `convertFrom` 通过 `WebService.get` 发出 JSONP 请求。线上带 `callback` 的成功响应是回调脚本，却标为 `application/json;charset=UTF-8`，同时带有 `X-Content-Type-Options:nosniff`，符合浏览器脚本 MIME 阻断条件；参见 [Fetch 标准](https://fetch.spec.whatwg.org/#x-content-type-options-header)。本次没有捕获真实浏览器控制台或实地定位结果，浏览器工具因无法确认当前网址而停止。
+- `amap-proxy.js` 仅在单个合法回调名与响应包装匹配、内部载荷可解析为 JSON 时改为 `text/javascript; charset=utf-8`；普通 JSON、HTML、无效回调或不匹配的响应保持上游类型。Node 和 Worker 共用该处理，保留 nosniff；后续坐标转换、道路查询等 SDK JSONP 请求均适用。
+- 修改 Node 部署需同时包含 `amap-proxy.js` 并重启进程；Worker 构建会内嵌该模块。新增测试先在旧实现复现两种后端的 MIME 错误，再验证修复后回调能执行。当前共 29 项测试，28 项通过，1 项 Windows 目录链接权限相关测试跳过；构建和语法检查通过。修复仅在本地，尚未推送或部署。
+- 已用线上真实的固定测试坐标 JSONP 响应回放到修复后的本地 Node handler 与构建后 Worker，两者均返回 JavaScript MIME、保留 nosniff，并执行回调得到高德转换坐标。此验证未修改线上服务，也不等于生产浏览器或实地定位验收。
