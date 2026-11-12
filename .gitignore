@@ -3,3 +3,9 @@ node_modules/
 .env.*
 !.env.example
 dist/
+.deployment/
+*.pem
+*.key
+*.p12
+*.pfx
+*.tar.gz

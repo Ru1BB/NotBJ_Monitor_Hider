@@ -1,0 +1,13 @@
+# Include inside an existing HTTPS server block.
+location = /jingtu { return 308 /jingtu/; }
+location ^~ /jingtu/ {
+    proxy_pass http://127.0.0.1:9178/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 30s;
+    # AMap requests may include browser authentication parameters: do not log them.
+    access_log off;
+}
