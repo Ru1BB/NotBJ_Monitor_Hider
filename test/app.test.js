@@ -37,13 +37,14 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
   }
   elements.get('radius').value='3';
   let reloads=0, maps=0, requests=0, scripts=0, context;
-  const apiRequests = [], markers = [];
+  const apiRequests = [], markers = [], watches = [], cleared = [], documentEvents = {}, windowEvents = {}, intervals = [];
+  const geolocation = {watchPosition(success,error,options){watches.push({success,error,options});return watches.length;},clearWatch(id){cleared.push(id);}};
   const amap = {
-    Map: class { constructor(_id,options){maps++;this.events={};this.zoom=options.zoom;} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} setZoomAndCenter(zoom){this.zoom=zoom;} getZoom(){return this.zoom;} },
+    Map: class { constructor(_id,options){maps++;this.events={};this.zoom=options.zoom;} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} panTo(){} setZoomAndCenter(zoom){this.zoom=zoom;} getZoom(){return this.zoom;} },
     Geocoder: class { getAddress(_position, cb) {requests++; cb('complete',{regeocode:{roads:[{name:'北四环辅路',distance:10}],crosses:[]}});} },
     Marker: class {constructor(options){this.options=options; markers.push(this);} setMap(map){this.removed=!map;}}, Circle: class {}, Pixel: class {},
   };
-  const document = {getElementById:id=>elements.get(id), createElement:()=>new Element(), addEventListener(){}, head:{append(script){
+  const document = {getElementById:id=>elements.get(id), createElement:()=>new Element(), addEventListener(name,handler){documentEvents[name]=handler;}, head:{append(script){
     scripts++;
     queueMicrotask(()=>{
       if(sdkFailure) script.onerror();
@@ -51,13 +52,13 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
     });
   }}};
   context=vm.createContext({
-    document, classifyRoad, gpsToAmap, ...junction, URL, window:{}, navigator:{}, location:{origin:'http://localhost',href:'http://localhost'+prefix,reload(){reloads++;}},
+    document, classifyRoad, gpsToAmap, ...junction, URL, window:{addEventListener(name,handler){windowEvents[name]=handler;}}, navigator:{geolocation}, location:{origin:'http://localhost',href:'http://localhost'+prefix,reload(){reloads++;}},
     sessionStorage:{getItem(key){if(blocked)throw Error('disabled');return store.get(key)||null;},setItem(key,value){if(blocked)throw Error('disabled');store.set(key,value);},removeItem(key){if(blocked)throw Error('disabled');store.delete(key);}},
     fetch:async(url,options)=>{apiRequests.push({url,options});return {ok:true,json:async()=>String(url).endsWith('api/config') ? {mapKey:'fake-js-key',securityProxy:proxy} : {cameras:[],fetchedAt:'2026-11-12T00:00:00Z',stale:false}};},
-    setTimeout, clearTimeout
+    setTimeout, clearTimeout, setInterval:fn=>intervals.push(fn)
   });
   vm.runInContext(source + '\nglobalThis.client={loadMap,clearSecurity,setPanel,showDetail,queueRoadLookup,setCenter,loadData,locate};',context);
-  return {client:context.client,elements,store,context,apiRequests,markers, stats:()=>({reloads,maps,requests,scripts})};
+  return {client:context.client,elements,store,context,apiRequests,markers,watches,cleared,documentEvents,windowEvents,intervals, stats:()=>({reloads,maps,requests,scripts})};
 }
 
 test('首次要求输入密钥，加载成功后刷新同标签页自动恢复；清除会移除会话并重载', async()=>{
@@ -79,13 +80,14 @@ test('首次要求输入密钥，加载成功后刷新同标签页自动恢复�
 test('坐标转换服务失败仍显示附近位置，回到当前位置保留近似转换提示', async()=>{
   const p=page({proxy:true}); await p.client.loadMap();
   p.context.AMap.convertFrom=(_point,_type,cb)=>cb('error',undefined);
-  p.context.navigator.geolocation={getCurrentPosition(success){success({coords:{longitude:116.404,latitude:39.915,accuracy:20}});}};
+  p.context.navigator.geolocation={clearWatch(){},watchPosition(success){success({coords:{longitude:116.404,latitude:39.915,accuracy:20}});}};
   p.client.locate();
   await new Promise(resolve=>setImmediate(resolve));
   assert.match(p.elements.get('location-status').textContent,/当前位置.*近似转换/);
   assert.match(p.elements.get('location-time').textContent,/不包含转换误差/);
   assert.ok(Math.abs(vm.runInContext('center.lng',p.context)-116.41024449916938)<1e-8);
   p.elements.get('recenter').events.click();
+  await new Promise(resolve=>setImmediate(resolve));
   assert.match(p.elements.get('location-status').textContent,/近似转换/);
 });
 
@@ -93,7 +95,7 @@ test('连续定位与手动选点不被旧的转换回调覆盖', async()=>{
   const p=page({proxy:true}); await p.client.loadMap();
   const conversions=[];
   p.context.AMap.convertFrom=(_point,_type,cb)=>conversions.push(cb);
-  p.context.navigator.geolocation={getCurrentPosition(success){success({coords:{longitude:116.404,latitude:39.915,accuracy:20}});}};
+  p.context.navigator.geolocation={clearWatch(){},watchPosition(success){success({coords:{longitude:116.404,latitude:39.915,accuracy:20}});}};
   p.client.locate(); p.client.locate();
   conversions[1]('complete',{locations:[{lng:116.42,lat:39.92}]});
   await new Promise(resolve=>setImmediate(resolve));
@@ -112,9 +114,10 @@ test('连续定位与手动选点不被旧的转换回调覆盖', async()=>{
 test('拒绝定位时不调用转换且保留明确提示', async()=>{
   const p=page({proxy:true}); await p.client.loadMap();
   p.context.AMap.convertFrom=()=>assert.fail('不应转换');
-  p.context.navigator.geolocation={getCurrentPosition(_success,error){error({code:1});}};
+  p.context.navigator.geolocation={clearWatch(){},watchPosition(_success,error){queueMicrotask(()=>error({code:1}));return 1;}};
   p.client.locate();
-  assert.match(p.elements.get('location-status').textContent,/未允许定位/);
+  await tick();
+  assert.match(p.elements.get('location-status').textContent,/定位权限被拒绝/);
   assert.equal(vm.runInContext('center',p.context),undefined);
 });
 
@@ -223,6 +226,9 @@ test('同路口仅绘制一个紫色方位点，详情可查看各成员，关�
   assert.equal(p.elements.get('detail').open,true);
   assert.match(p.elements.get('detail-title').textContent,/甲路 × 乙街/);
   assert.match(p.elements.get('detail-body').innerHTML,/不代表拍摄朝向/);
+  p.client.setCenter({lng:116.4,lat:39.9},'gps',10,false);
+  assert.equal(p.elements.get('detail').open,true);
+  assert.match(p.elements.get('detail-title').textContent,/甲路 × 乙街/);
   p.elements.get('detail-body').children.find(c=>c.className==='junction-member').events.click();
   assert.match(p.elements.get('detail-title').textContent,/北向南/);
   p.elements.get('junction-enabled').checked=false;
@@ -267,4 +273,64 @@ test('放大到 16 级展开路口小点，缩小恢复，不依赖蓝色数字�
   assert.equal(p.elements.get('junction-legend').hidden,false);
   assert.equal(p.stats().requests,0);
   assert.doesNotMatch(source,/MarkerCluster/);
+});
+
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const position = (lat, timestamp) => ({coords:{longitude:116.4,latitude:lat,accuracy:10},timestamp});
+async function trackingPage() {
+  const p=page({proxy:true}); await p.client.loadMap();
+  vm.runInContext("geocoder=null; cameras=[{id:'north',name:'北边',lng:116.4,lat:40.1},{id:'south',name:'南边',lng:116.4,lat:39.8}];",p.context);
+  p.context.AMap.convertFrom=(coords,_type,cb)=>cb('complete',{locations:[{lng:coords[0],lat:coords[1]}]});
+  p.client.locate(); return p;
+}
+test('向南移动后更新附近探头、距离和标记，并保留缩放级别',async()=>{
+  const p=await trackingPage();
+  assert.equal(p.watches[0].options.maximumAge,0);
+  p.watches[0].success(position(40.1,100)); await tick();
+  assert.equal(vm.runInContext('visible[0].id',p.context),'north');
+  vm.runInContext('map.zoom=17',p.context);
+  p.watches[0].success(position(39.8,200)); await tick();
+  assert.equal(vm.runInContext('visible.length',p.context),1);
+  assert.equal(vm.runInContext('visible[0].id',p.context),'south');
+  assert.equal(vm.runInContext('visible[0].distance',p.context),0);
+  assert.equal(vm.runInContext('map.zoom',p.context),17);
+  assert.equal(p.markers.filter(m=>!m.removed&&m.options.content?.className==='camera-marker').length,1);
+  assert.match(p.markers.findLast(m=>m.options.content?.className==='camera-marker').options.title,/南边/);
+});
+test('同一监听的乱序转换与较旧定位不能覆盖最新位置',async()=>{
+  const p=await trackingPage(), callbacks=[];
+  p.context.AMap.convertFrom=(_coords,_type,cb)=>callbacks.push(cb);
+  p.watches[0].success(position(40.1,100)); p.watches[0].success(position(39.8,200));
+  callbacks[1]('complete',{locations:[{lng:116.4,lat:39.8}]}); await tick();
+  callbacks[0]('complete',{locations:[{lng:116.4,lat:40.1}]}); await tick();
+  p.watches[0].success(position(40.1,150));
+  assert.equal(callbacks.length,2);
+  assert.equal(vm.runInContext('visible[0].id',p.context),'south');
+});
+test('手动选点停止监听，恢复定位后丢弃旧监听回调',async()=>{
+  const p=await trackingPage();
+  p.client.setCenter({lng:116.4,lat:39.8},'manual');
+  assert.deepEqual(p.cleared,[1]);
+  p.watches[0].success(position(40.1,100)); await tick();
+  assert.equal(vm.runInContext('center.lat',p.context),39.8);
+  p.client.locate();
+  p.watches[1].success(position(40.1,200)); await tick();
+  assert.equal(vm.runInContext('visible[0].id',p.context),'north');
+});
+test('切回前台恢复监听，旧位置和定位异常明确提示且可恢复',async()=>{
+  const p=await trackingPage();
+  p.watches[0].success(position(40.1,100)); await tick();
+  vm.runInContext('lastFixAt=Date.now()-31000',p.context); p.intervals[0]();
+  assert.match(p.elements.get('location-status').textContent,/上次位置/);
+  p.context.document.hidden=true; p.documentEvents.visibilitychange();
+  assert.deepEqual(p.cleared,[1]);
+  p.context.document.hidden=false; p.documentEvents.visibilitychange();
+  assert.equal(p.watches.length,2);
+  p.watches[1].error({code:3});
+  assert.match(p.elements.get('location-status').textContent,/暂未更新/);
+  p.watches[1].success(position(39.8,200)); await tick();
+  assert.equal(vm.runInContext('visible[0].id',p.context),'south');
+  p.watches[1].error({code:1});
+  assert.equal(vm.runInContext('following',p.context),false);
+  assert.deepEqual(p.cleared,[1,2]);
 });

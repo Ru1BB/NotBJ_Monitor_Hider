@@ -12,7 +12,6 @@ let geocoder, roadQueueRunning = false, roadRequests = 0, priorityCamera = null;
 let map, cameraMarkers = [], centerMarker, accuracyCircle, currentPosition, center;
 let cameras = [], visible = [], selected = null, choosing = false, loadingMap = false;
 let activeCode = '', activeKey = '', usesProxy = false;
-let locationRequest = 0;
 let junctionMarkers = [], junctionGroups = [], selectedJunction = null, selectedJunctionMembers = [];
 const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const roadLabel = road => road.kind === 'major' ? '主路 / 高速 / 高架（推测）' : road.kind === 'other' ? '辅路 / 地面 / 匝道（推测）' : '道路待确认';
@@ -179,34 +178,77 @@ async function queueRoadLookup() {
     $('road-status').textContent = roadRequests >= 100 ? '本页高德辅助查询已达 100 次上限，未查询点仍需核对。' : `当前范围辅助查询完成 · 本页已请求 ${roadRequests} / 100 次`;
   } finally { roadQueueRunning = false; }
 }
-function setCenter(pos, type, accuracy) {
-  center=pos;
-  if(map) {
-    if(centerMarker) map.remove(centerMarker);
-    if(accuracyCircle) {map.remove(accuracyCircle); accuracyCircle=null;}
-    centerMarker=new AMap.Marker({position:[pos.lng,pos.lat],title:type==='manual'?'手动查询中心':'当前位置',map});
-    if(type==='gps' && Number.isFinite(accuracy)) accuracyCircle=new AMap.Circle({center:[pos.lng,pos.lat],radius:accuracy,strokeColor:'#478dcc',strokeOpacity:.5,fillColor:'#7bb1e2',fillOpacity:.14,map});
-    map.setZoomAndCenter(14,[pos.lng,pos.lat]);
+// A generation invalidates callbacks from stopped watches and older conversions.
+let watchId = null, locationGeneration = 0, locationSequence = 0;
+let following = false, lastFixAt = 0, lastFixTimestamp = 0;
+function stopLocationWatch() {
+  locationGeneration++;
+  if (watchId !== null) navigator.geolocation?.clearWatch(watchId);
+  watchId = null;
+}
+function setCenter(pos, type, accuracy, initial = true) {
+  center = pos;
+  if (type === 'manual') { following = false; stopLocationWatch(); }
+  if (map) {
+    if (centerMarker) map.remove(centerMarker);
+    if (accuracyCircle) { map.remove(accuracyCircle); accuracyCircle = null; }
+    centerMarker = new AMap.Marker({position:[pos.lng,pos.lat],title:type==='manual'?'手动查询中心':'当前位置',map});
+    if (type === 'gps' && Number.isFinite(accuracy)) accuracyCircle = new AMap.Circle({center:[pos.lng,pos.lat],radius:accuracy,strokeColor:'#478dcc',strokeOpacity:.5,fillColor:'#7bb1e2',fillOpacity:.14,map});
+    if (initial) map.setZoomAndCenter(14,[pos.lng,pos.lat]);
+    else if (!choosing) map.panTo([pos.lng,pos.lat]);
   }
-  $('location-status').textContent=type==='manual'?'以手动选点查询':`当前位置${Number.isFinite(accuracy)?` · 定位精度约 ${Math.round(accuracy)} 米`:''}${pos.approximate?' · 近似转换':''}`;
-  $('location-time').textContent=type==='gps'?`定位时间 ${new Date().toLocaleTimeString('zh-CN')}${pos.approximate?'；在线坐标转换暂不可用，已使用本地近似转换，显示的定位精度不包含转换误差。':''}`:'';
+  $('location-status').textContent = type === 'manual' ? '以手动选点查询' : `当前位置 · 实时定位中${Number.isFinite(accuracy)?` · 精度约 ${Math.round(accuracy)} 米`:''}${pos.approximate?' · 近似转换':''}`;
+  $('location-time').textContent = type === 'gps' ? `定位时间 ${new Date(pos.timestamp || Date.now()).toLocaleTimeString('zh-CN')}${pos.approximate?'；在线坐标转换暂不可用，已使用本地近似转换，显示的定位精度不包含转换误差。':''}` : '';
   render();
+  if ($('detail').open && selected !== null) {
+    const camera = visible.find(c => c.id === selected);
+    if (camera) paintDetail(camera);
+    else { $('detail').close(); selected = null; }
+  }
 }
 function locate() {
-  const request = ++locationRequest;
-  if (!map) { $('location-status').textContent='请先加载地图'; return; }
-  $('location-status').textContent='正在定位…';
-  if (!navigator.geolocation) { $('location-status').textContent='浏览器不支持定位，请在设置中手动选点'; return; }
-  navigator.geolocation.getCurrentPosition(async pos=>{
-    if (request !== locationRequest) return;
+  if (!map) { $('location-status').textContent = '请先加载地图'; return; }
+  stopLocationWatch();
+  following = true;
+  choosing = false; $('map-instruction').hidden = true;
+  $('location-status').textContent = '定位中，请允许浏览器获取位置…';
+  if (!navigator.geolocation) { following = false; $('location-status').textContent = '浏览器不支持定位，请手动选择地图位置。'; return; }
+  const generation = locationGeneration;
+  let initial = true;
+  lastFixAt = 0; lastFixTimestamp = 0;
+  watchId = navigator.geolocation.watchPosition(async pos => {
+    if (generation !== locationGeneration || !following) return;
+    if (pos.timestamp < lastFixTimestamp) return;
+    lastFixTimestamp = pos.timestamp;
+    const sequence = ++locationSequence;
     try {
-      const p = await gpsToAmap(pos.coords.longitude, pos.coords.latitude, (...args)=>AMap.convertFrom(...args));
-      if (request !== locationRequest) return;
-      choosing=false; $('map-instruction').hidden=true;
-      currentPosition={...p,accuracy:pos.coords.accuracy}; setCenter(currentPosition,'gps',currentPosition.accuracy);
-    } catch (e) { if (request === locationRequest) $('location-status').textContent=e.message; }
-  },err=>{ if (request === locationRequest) $('location-status').textContent=({1:'未允许定位，可在设置中手动选点',2:'无法获取位置，请重新定位或手动选点',3:'定位超时，请重试或手动选点'}[err.code]||'定位失败，请重试'); },{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+      const p = await gpsToAmap(pos.coords.longitude, pos.coords.latitude, (...args) => AMap.convertFrom(...args));
+      if (generation !== locationGeneration || sequence !== locationSequence || !following) return;
+      lastFixAt = Date.now();
+      currentPosition = {...p,accuracy:pos.coords.accuracy,timestamp:pos.timestamp};
+      setCenter(currentPosition,'gps',currentPosition.accuracy,initial);
+      initial = false;
+    } catch (e) {
+      if (generation === locationGeneration && sequence === locationSequence) $('location-status').textContent = `${e.message}，周边探头暂未更新。`;
+    }
+  }, err => {
+    if (generation !== locationGeneration) return;
+    locationSequence++;
+    $('location-status').textContent = ({1:'定位权限被拒绝，请开启权限后重新定位或手动选点。',2:'无法获取新位置，周边探头暂未更新，等待定位恢复。',3:'定位超时，周边探头暂未更新，等待定位恢复。'}[err.code] || '定位失败，请重试或手动选点。');
+    if (err.code === 1) { following = false; stopLocationWatch(); }
+  }, {enableHighAccuracy:true,timeout:15000,maximumAge:0});
 }
+// Browsers may suspend location in the background; request a fresh watch on return.
+document.addEventListener('visibilitychange', () => {
+  if (!following) return;
+  if (document.hidden) stopLocationWatch();
+  else locate();
+});
+window.addEventListener('pagehide', stopLocationWatch);
+window.addEventListener('pageshow', () => { if (following && watchId === null) locate(); });
+setInterval(() => {
+  if (following && lastFixAt && Date.now() - lastFixAt > 30000) $('location-status').textContent = '位置超过 30 秒未更新，当前为上次位置的周边探头，等待定位恢复。';
+}, 5000);
 async function loadSdk(key) {
   if (window.AMap) return;
   await new Promise((resolve,reject)=>{
@@ -251,7 +293,7 @@ async function loadMap(securityCode = '') {
     map.on('zoomend',renderMapMarkers);
     map.on('click',e=>{ if(choosing) { choosing=false; $('map-instruction').hidden=true; setCenter({lng:e.lnglat.lng,lat:e.lnglat.lat},'manual'); } });
     if (!usesProxy) saveCode(config.mapKey,code);
-    if(center) setCenter(center,'manual'); else render();
+    if(center) setCenter(center,following?'gps':'manual',center.accuracy); else render();
     return true;
   } catch(e) {
     $('security-form').hidden=true; $('map-error-text').textContent=e.message; $('map-error').hidden=false;
@@ -290,8 +332,8 @@ $('radius').addEventListener('change',render);
 $('junction-enabled').addEventListener('change',render);
 $('refresh').addEventListener('click',()=>loadData(true));
 $('locate').addEventListener('click',locate);
-$('recenter').addEventListener('click',()=>{ if(currentPosition) { ++locationRequest; choosing=false; $('map-instruction').hidden=true; setCenter(currentPosition,'gps',currentPosition.accuracy); } else locate(); });
-$('select').addEventListener('click',()=>{ if(!map) return; ++locationRequest; setPanel('',false); choosing=true; $('map-instruction').hidden=false; });
+$('recenter').addEventListener('click',locate);
+$('select').addEventListener('click',()=>{ if(!map) return; setPanel('',false); choosing=true; $('map-instruction').hidden=false; });
 $('cancel-select').addEventListener('click',()=>{choosing=false;$('map-instruction').hidden=true;});
 $('retry-map').addEventListener('click',async()=>{ if(await loadMap()) locate(); });
 $('change-security').addEventListener('click',clearSecurity);
