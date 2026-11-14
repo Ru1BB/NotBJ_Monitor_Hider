@@ -3,11 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { parseLabels } from './parser.js';
 import { amapContentType } from './amap-proxy.js';
+import { createRouteService, routeLimits } from './route-service.js';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const SOURCE = 'https://www.jinjing365.com/index.asp';
 const root = path.dirname(fileURLToPath(import.meta.url));
+const planRoute = createRouteService();
 const ttl = 10 * 60_000, refreshInterval = 60_000;
 let cache = null, pending = null, lastAttempt = 0, lastError = '';
 async function update() {
@@ -29,11 +31,19 @@ async function update() {
 }
 function payload() { return { cameras: cache?.cameras || [], fetchedAt: cache?.fetchedAt || null, source: SOURCE, stale: !!cache && (Date.now() - Date.parse(cache.fetchedAt) > ttl || !!lastError), warning: lastError ? '来源数据更新失败，请稍后重试。' : cache?.invalid ? `有 ${cache.invalid} 条异常记录被忽略，数据可能不完整。` : '', coordinateSystem: '来源坐标系尚未核验' }; }
 function json(res, status, value) { res.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}); res.end(JSON.stringify(value)); }
-const files = { '/': ['public/index.html','text/html; charset=utf-8'], '/app.js':['public/app.js','text/javascript; charset=utf-8'], '/road.js':['public/road.js','text/javascript; charset=utf-8'], '/junction.js':['public/junction.js','text/javascript; charset=utf-8'], '/location.js':['public/location.js','text/javascript; charset=utf-8'], '/style.css':['public/style.css','text/css; charset=utf-8'] };
+const files = { '/routing.js':['public/routing.js','text/javascript; charset=utf-8'], '/': ['public/index.html','text/html; charset=utf-8'], '/app.js':['public/app.js','text/javascript; charset=utf-8'], '/road.js':['public/road.js','text/javascript; charset=utf-8'], '/junction.js':['public/junction.js','text/javascript; charset=utf-8'], '/location.js':['public/location.js','text/javascript; charset=utf-8'], '/style.css':['public/style.css','text/css; charset=utf-8'] };
 export const server = http.createServer(async (req,res) => {
   try {
     const url = new URL(req.url,'http://localhost');
-    if (req.method === 'GET' && url.pathname === '/api/config') return json(res,200,{mapKey:process.env.AMAP_KEY || '', securityProxy: !!process.env.AMAP_SECURITY_CODE});
+    if (req.method === 'GET' && url.pathname === '/api/config') return json(res,200,{mapKey:process.env.AMAP_KEY || '', securityProxy: !!process.env.AMAP_SECURITY_CODE, routingEnabled:!!process.env.AMAP_WEB_SERVICE_KEY, routeMaxRegions:routeLimits(process.env)});
+    if (req.method === 'POST' && url.pathname === '/api/route') {
+      try {
+        const chunks=[]; let size=0;
+        for await (const chunk of req) {size+=chunk.length;if(size>32768)return json(res,413,{error:'路线请求过大。'});chunks.push(chunk);}
+        let input; try {input=JSON.parse(Buffer.concat(chunks).toString());} catch {return json(res,400,{error:'路线请求格式无效。'});}
+        return json(res,200,await planRoute(input,process.env));
+      } catch(e) {return json(res,e.status||502,{error:e.status?e.message:'路线规划暂时不可用。'});}
+    }
     if (url.pathname === '/api/cameras' && req.method === 'GET') { if (pending) await pending; else if ((!cache || Date.now()-Date.parse(cache.fetchedAt)>ttl) && Date.now()-lastAttempt>=refreshInterval) await update(); return json(res,cache ? 200 : 503,payload()); }
     if (url.pathname === '/api/cameras/refresh' && req.method === 'POST') { if (pending) await pending; else if (Date.now()-lastAttempt>=refreshInterval) await update(); else return json(res,cache ? 200 : 429,{...payload(), warning:'刷新过于频繁，请稍后重试。'}); return json(res,cache ? 200 : 503,payload()); }
     if (url.pathname.startsWith('/_AMapService/')) {

@@ -15,7 +15,7 @@ test('server starts through a release directory symlink', {timeout:10_000}, asyn
     try { await symlink(fileURLToPath(new URL('..',import.meta.url)),link,process.platform==='win32'?'junction':'dir'); }
     catch (error) { if (error.code==='EPERM') return t.skip('Directory links unavailable'); throw error; }
     child=spawn(process.execPath,[path.join(link,'server.js')],{
-      env:{...process.env,HOST:'127.0.0.1',PORT:'0',AMAP_KEY:'',AMAP_SECURITY_CODE:''},
+      env:{...process.env,HOST:'127.0.0.1',PORT:'0',AMAP_KEY:'',AMAP_SECURITY_CODE:'',AMAP_WEB_SERVICE_KEY:'',AMAP_ROUTE_MAX_REGIONS:'1'},
       stdio:['ignore','pipe','pipe']
     });
     const address=await new Promise((resolve,reject)=>{
@@ -32,7 +32,7 @@ test('server starts through a release directory symlink', {timeout:10_000}, asyn
     });
     const response=await fetch('http://'+address+'/api/config');
     assert.equal(response.status,200);
-    assert.deepEqual(await response.json(),{mapKey:'',securityProxy:false});
+    assert.deepEqual(await response.json(),{mapKey:'',securityProxy:false,routingEnabled:false,routeMaxRegions:1});
   } finally {
     if(child && child.exitCode===null){const exited=once(child,'exit');child.kill();await exited;}
     if(path.dirname(path.resolve(temp))!==path.resolve(tmpdir()) || !path.basename(temp).startsWith('jingtu-startup-')) throw Error('Unexpected temporary cleanup path');

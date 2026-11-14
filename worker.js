@@ -1,10 +1,20 @@
 import { amapContentType } from './amap-proxy.js';
+import { createRouteService, routeLimits } from './route-service.js';
+const planRoute = createRouteService();
 const SOURCE='https://www.jinjing365.com/index.asp';
 let cache=null,pending=null,lastAttempt=0,lastError='';
 async function update(){if(pending)return pending;lastAttempt=Date.now();pending=(async()=>{try{const response=await fetch(SOURCE,{signal:AbortSignal.timeout(12000)});if(!response.ok)throw Error('来源站 HTTP '+response.status);const bytes=await response.arrayBuffer();if(bytes.byteLength>10000000)throw Error('来源页面过大');const charset=response.headers.get('content-type')?.match(/charset\s*=\s*([^;\s]+)/i)?.[1]||'utf-8';const result=parseLabels(new TextDecoder(charset).decode(bytes));if(cache&&result.cameras.length<cache.cameras.length*.5)throw Error('记录数量异常减少');cache={...result,fetchedAt:new Date().toISOString()};lastError='';}catch(e){lastError='来源数据更新失败，请稍后重试。';console.error('数据更新失败',e.message);}finally{pending=null;}})();return pending;}
 const json=(value,status=200)=>Response.json(value,{status,headers:{'Cache-Control':'no-store'}});
 export default {async fetch(request,env){const url=new URL(request.url);try{
-if(url.pathname==='/api/config')return json({mapKey:env.AMAP_KEY||'',securityProxy:!!env.AMAP_SECURITY_CODE});
+if(url.pathname==='/api/config')return json({mapKey:env.AMAP_KEY||'',securityProxy:!!env.AMAP_SECURITY_CODE,routingEnabled:!!env.AMAP_WEB_SERVICE_KEY,routeMaxRegions:routeLimits(env)});
+if(url.pathname==='/api/route'&&request.method==='POST'){
+try{
+const reader=request.body?.getReader();let size=0;const chunks=[];
+if(reader){while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>32768){await reader.cancel();return json({error:'路线请求过大。'},413);}chunks.push(value);}}
+const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+let input;try{input=JSON.parse(new TextDecoder().decode(bytes));}catch{return json({error:'路线请求格式无效。'},400);}
+return json(await planRoute(input,env));
+}catch(e){return json({error:e.status?e.message:'路线规划暂时不可用。'},e.status||502);}}
 if((url.pathname==='/api/cameras'&&request.method==='GET')||(url.pathname==='/api/cameras/refresh'&&request.method==='POST')){const force=request.method==='POST';let limited=false;if(pending)await pending;else if((force||!cache||Date.now()-Date.parse(cache.fetchedAt)>600000)&&Date.now()-lastAttempt>=60000)await update();else if(force)limited=true;return json({cameras:cache?.cameras||[],fetchedAt:cache?.fetchedAt||null,source:SOURCE,stale:!!cache&&(!!lastError||Date.now()-Date.parse(cache.fetchedAt)>600000),warning:limited?'刷新过于频繁，请稍后重试。':lastError||(cache?.invalid?'部分异常记录已忽略，数据可能不完整。':''),coordinateSystem:'来源坐标系尚未核验'},cache?200:limited?429:503);}
 if(url.pathname.startsWith('/_AMapService/')&&request.method==='GET'&&env.AMAP_SECURITY_CODE){
 const target=new URL('https://restapi.amap.com/');target.pathname='/'+url.pathname.slice('/_AMapService/'.length);target.search=url.search;target.searchParams.set('jscode',env.AMAP_SECURITY_CODE);

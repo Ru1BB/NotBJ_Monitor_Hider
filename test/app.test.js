@@ -5,14 +5,49 @@ import vm from 'node:vm';
 import { classifyRoad } from '../public/road.js';
 import { gpsToAmap } from '../public/location.js';
 import * as junction from '../public/junction.js';
+import * as routing from '../public/routing.js';
 
 const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8')
   .replace("import { classifyRoad } from './road.js';", '')
   .replace("import { gpsToAmap } from './location.js';", '')
   .replace("import { DIRECTIONS, groupJunctions, junctionMarkerHTML } from './junction.js';", '')
+  .replace("import { parsePoint, createPlan, runPlan } from './routing.js';", '')
   .replace('loadData(); loadMap().then(loaded=>{ if(loaded) locate(); });', '');
 const SESSION_KEY = 'jingtu.amap.session';
+
+test('路线地图选点不发送查询；重复提交合并，成功及修改端点状态正确',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  p.client.pickRoutePoint('origin');
+  vm.runInContext('map.events.click({lnglat:{lng:116.3,lat:39.9}})',p.context);
+  assert.equal(p.elements.get('route-origin').value,'116.300000,39.900000');
+  assert.equal(p.apiRequests.length,1);
+  p.client.pickRoutePoint('destination');
+  vm.runInContext('map.events.click({lnglat:{lng:116.5,lat:39.9}})',p.context);
+  vm.runInContext('routeEnabled=true;routeMaxRegions=32;cameras=[{lng:116.4,lat:39.9}]',p.context);
+  let calls=0,release;
+  p.context.fetch=async()=>{calls++;await new Promise(r=>release=r);return {ok:true,json:async()=>({cached:false,route:{paths:[[[116.3,39.9],[116.3,39.92],[116.5,39.92],[116.5,39.9]]],distance:23000,duration:1500}})};};
+  const first=p.client.planRoute();
+  assert.equal(p.elements.get('route-start').disabled,true);
+  await p.client.planRoute();assert.equal(calls,1);
+  release();await first;
+  assert.match(p.elements.get('route-status').textContent,/已找到/);
+  assert.equal(p.elements.get('route-start').disabled,false);
+  p.elements.get('route-destination').events.input();
+  assert.equal(vm.runInContext('routePlan',p.context),null);
+});
+
+test('路线服务错误保留可理解提示并恢复按钮；数据更新丢弃旧规划',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  p.elements.get('route-origin').value='116.3,39.9';p.elements.get('route-destination').value='116.5,39.9';
+  vm.runInContext('routeEnabled=true;cameras=[{lng:116.4,lat:39.9}]',p.context);
+  p.context.fetch=async()=>({ok:false,json:async()=>({error:'高德配额已用完'})});
+  await p.client.planRoute();
+  assert.match(p.elements.get('route-status').textContent,/配额已用完/);
+  assert.equal(p.elements.get('route-start').disabled,false);
+  p.context.fetch=async()=>{vm.runInContext('cameraVersion++',p.context);return {ok:true,json:async()=>({cached:true,route:{paths:[[[116.3,39.92],[116.5,39.92]]],distance:10,duration:10}})};};
+  await p.client.planRoute();assert.match(p.elements.get('route-status').textContent,/数据已更新/);
+});
 
 // Exercise the production initialization and handlers with deterministic DOM/SDK/network adapters.
 function page({store = new Map(), blocked = false, proxy = false, sdkFailure = false, prefix = '/'} = {}) {
@@ -40,9 +75,9 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
   const apiRequests = [], markers = [], watches = [], cleared = [], documentEvents = {}, windowEvents = {}, intervals = [];
   const geolocation = {watchPosition(success,error,options){watches.push({success,error,options});return watches.length;},clearWatch(id){cleared.push(id);}};
   const amap = {
-    Map: class { constructor(_id,options){maps++;this.events={};this.zoom=options.zoom;} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} panTo(){} setZoomAndCenter(zoom){this.zoom=zoom;} getZoom(){return this.zoom;} },
+    Map: class { constructor(_id,options){maps++;this.events={};this.zoom=options.zoom;} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} panTo(){} setFitView(){} setZoomAndCenter(zoom){this.zoom=zoom;} getZoom(){return this.zoom;} },
     Geocoder: class { getAddress(_position, cb) {requests++; cb('complete',{regeocode:{roads:[{name:'北四环辅路',distance:10}],crosses:[]}});} },
-    Marker: class {constructor(options){this.options=options; markers.push(this);} setMap(map){this.removed=!map;}}, Circle: class {}, Pixel: class {},
+    Marker: class {constructor(options){this.options=options; markers.push(this);} setMap(map){this.removed=!map;}}, Polyline:class {setMap(){}}, Circle: class {}, Pixel: class {},
   };
   const document = {getElementById:id=>elements.get(id), createElement:()=>new Element(), addEventListener(name,handler){documentEvents[name]=handler;}, head:{append(script){
     scripts++;
@@ -52,12 +87,12 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
     });
   }}};
   context=vm.createContext({
-    document, classifyRoad, gpsToAmap, ...junction, URL, window:{addEventListener(name,handler){windowEvents[name]=handler;}}, navigator:{geolocation}, location:{origin:'http://localhost',href:'http://localhost'+prefix,reload(){reloads++;}},
+    document, classifyRoad, gpsToAmap, ...junction, ...routing, URL, AbortSignal, window:{addEventListener(name,handler){windowEvents[name]=handler;}}, navigator:{geolocation}, location:{origin:'http://localhost',href:'http://localhost'+prefix,reload(){reloads++;}},
     sessionStorage:{getItem(key){if(blocked)throw Error('disabled');return store.get(key)||null;},setItem(key,value){if(blocked)throw Error('disabled');store.set(key,value);},removeItem(key){if(blocked)throw Error('disabled');store.delete(key);}},
     fetch:async(url,options)=>{apiRequests.push({url,options});return {ok:true,json:async()=>String(url).endsWith('api/config') ? {mapKey:'fake-js-key',securityProxy:proxy} : {cameras:[],fetchedAt:'2026-11-12T00:00:00Z',stale:false}};},
     setTimeout, clearTimeout, setInterval:fn=>intervals.push(fn)
   });
-  vm.runInContext(source + '\nglobalThis.client={loadMap,clearSecurity,setPanel,showDetail,queueRoadLookup,setCenter,loadData,locate};',context);
+  vm.runInContext(source + '\nglobalThis.client={loadMap,clearSecurity,setPanel,showDetail,queueRoadLookup,setCenter,loadData,locate,planRoute,pickRoutePoint};',context);
   return {client:context.client,elements,store,context,apiRequests,markers,watches,cleared,documentEvents,windowEvents,intervals, stats:()=>({reloads,maps,requests,scripts})};
 }
 

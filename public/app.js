@@ -1,6 +1,7 @@
 import { classifyRoad } from './road.js';
 import { gpsToAmap } from './location.js';
 import { DIRECTIONS, groupJunctions, junctionMarkerHTML } from './junction.js';
+import { parsePoint, createPlan, runPlan } from './routing.js';
 const $ = id => document.getElementById(id);
 // Keep assets, APIs and the AMap proxy under the same reverse-proxy prefix.
 const appBase = new URL('.', location.href);
@@ -13,6 +14,62 @@ let map, cameraMarkers = [], centerMarker, accuracyCircle, currentPosition, cent
 let cameras = [], visible = [], selected = null, choosing = false, loadingMap = false;
 let activeCode = '', activeKey = '', usesProxy = false;
 let junctionMarkers = [], junctionGroups = [], selectedJunction = null, selectedJunctionMembers = [];
+let routeEnabled = false, routeMaxRegions = 1, routeBusy = false, routePick = '', routePlan = null, routeOverlays = [], cameraVersion = 0, routeVersion = 0;
+function clearRoute() {
+  routePlan = null;
+  routeOverlays.forEach(m=>m.setMap(null)); routeOverlays=[];
+  $('route-continue').hidden=true;
+}
+function drawRoute(plan) {
+  routeOverlays.forEach(m=>m.setMap(null)); routeOverlays=[];
+  const safe = plan.reason==='success';
+  for (const path of plan.route.paths) routeOverlays.push(new AMap.Polyline({map,path,strokeColor:safe?'#245641':'#b57927',strokeWeight:6,strokeOpacity:.85}));
+  for (const [p,title] of [[plan.origin,'起点 A'],[plan.destination,'终点 B']]) routeOverlays.push(new AMap.Marker({map,position:[p.lng,p.lat],title}));
+  map.setFitView(routeOverlays);
+}
+function routeSummary(plan) {
+  const reasons={endpoint:'起点或终点落入所需避让区域，请调整位置。',success:'已找到避开当前已知摄像头区域的路线。',budget:'已达到本轮规划次数上限，仍未找到符合条件的路线。',time:'已达到本轮时间上限，仍未找到符合条件的路线。',regions:'已达到本站避让区域数量上限，仍未找到符合条件的路线。',unchanged:'路线重复或避让未生效，已停止重算。'};
+  return `${reasons[plan.reason]} 累计发起 ${plan.calls} 次高德请求，复用 ${plan.cacheHits} 次缓存或并发结果；已累积 ${plan.areas.size} 个避让区域。${plan.route?` 路程 ${(plan.route.distance/1000).toFixed(1)} 公里，预计 ${Math.ceil(plan.route.duration/60)} 分钟。`:''}${plan.hits.length?` 当前参考路线仍接近 ${plan.hits.length} 条已知点位记录，橙色路线未通过避让检查。`:''}`;
+}
+async function planRoute(continuing = false) {
+  if(routeBusy) return;
+  if(!map || !routeEnabled) { $('route-status').textContent='请先加载地图；站点须配置高德 Web 服务 Key 才能规划路线。';return; }
+  if(!cameras.length) { $('route-status').textContent='探头数据未加载，请在设置中刷新后再试。';return; }
+  try {
+    const origin=parsePoint($('route-origin').value), destination=parsePoint($('route-destination').value);
+    if(!continuing || !routePlan || routeVersion!==cameraVersion || JSON.stringify(origin)!==JSON.stringify(routePlan.origin) || JSON.stringify(destination)!==JSON.stringify(routePlan.destination)) {
+      clearRoute(); routePlan=createPlan(origin,destination,cameras,routeMaxRegions); routeVersion=cameraVersion;
+    }
+    if(continuing && !routePlan.resumable) return;
+    const plan=routePlan;
+    routeBusy=true; routePick=''; choosing=false; $('map-instruction').hidden=true;
+    $('route-continue').hidden=true;
+    for(const id of ['route-start','route-current','route-pick-origin','route-pick-destination','route-clear','route-origin','route-destination','refresh']) $(id).disabled=true;
+    await runPlan(plan,async input=>{
+      const response=await fetch(appUrl('api/route'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input),cache:'no-store',signal:AbortSignal.timeout(15000)});
+      const result=await response.json();
+      if(!response.ok) throw Error(result.error || '路线规划失败，请稍后重试。');
+      return result;
+    },p=>{$('route-status').textContent=`正在规划与本地检查… 已发起 ${p.calls} 次高德请求，复用 ${p.cacheHits} 次；累积 ${p.areas.size} 个避让区域。`;});
+    if(routeVersion!==cameraVersion) {clearRoute();$('route-status').textContent='规划期间探头数据已更新，请重新规划。';return;}
+    drawRoute(plan);
+    $('route-status').textContent=routeSummary(plan);
+    $('route-continue').hidden=!plan.resumable;
+  } catch(e) {
+    routeOverlays.forEach(m=>m.setMap(null)); routeOverlays=[];
+    $('route-continue').hidden=true;
+    $('route-status').textContent=`${e.message} 本次未取得通过避让检查的路线。`;
+  } finally {
+    routeBusy=false;
+    for(const id of ['route-start','route-current','route-pick-origin','route-pick-destination','route-clear','route-origin','route-destination','refresh']) $(id).disabled=false;
+  }
+}
+function pickRoutePoint(which) {
+  if(!map || routeBusy)return;
+  routePick=which; choosing=false; setPanel('',false);
+  $('map-instruction').hidden=false;
+  $('instruction-text').textContent=`点击地图选择${which==='origin'?'起点 A':'终点 B'}`;
+}
 const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const roadLabel = road => road.kind === 'major' ? '主路 / 高速 / 高架（推测）' : road.kind === 'other' ? '辅路 / 地面 / 匝道（推测）' : '道路待确认';
 function distance(a,b) {
@@ -39,9 +96,9 @@ function saveCode(key, code) {
   catch { storageUnavailable(); }
 }
 function setPanel(name, open) {
-  for (const panel of ['list', 'settings']) {
+  for (const panel of ['list', 'settings', 'route']) {
     const show = panel === name && open;
-    $(panel === 'list' ? 'camera-panel' : 'settings-panel').hidden = !show;
+    $(panel === 'list' ? 'camera-panel' : panel+'-panel').hidden = !show;
     $('toggle-' + panel).setAttribute('aria-expanded', String(show));
   }
 }
@@ -210,6 +267,7 @@ function locate() {
   if (!map) { $('location-status').textContent = '请先加载地图'; return; }
   stopLocationWatch();
   following = true;
+  routePick='';
   choosing = false; $('map-instruction').hidden = true;
   $('location-status').textContent = '定位中，请允许浏览器获取位置…';
   if (!navigator.geolocation) { following = false; $('location-status').textContent = '浏览器不支持定位，请手动选择地图位置。'; return; }
@@ -273,6 +331,9 @@ async function loadMap(securityCode = '') {
     const response=await fetch(appUrl('api/config'),{cache:'no-store'});
     if (!response.ok) throw Error('地图配置获取失败，请重试。');
     const config=await response.json();
+    routeEnabled=!!config.routingEnabled; routeMaxRegions=config.routeMaxRegions||1;
+    $('route-limits').textContent=`本站单次最多支持 ${routeMaxRegions} 个避让区域。`;
+    if(!routeEnabled) $('route-status').textContent='路线规划尚未配置 Web 服务 Key，请联系站点管理员。';
     if(!config.mapKey) throw Error('尚未配置高德 JS API Key，请参照 README 配置。');
     const code=securityCode || (activeKey === config.mapKey ? activeCode : '') || readCode(config.mapKey);
     usesProxy=!!config.securityProxy;
@@ -287,11 +348,18 @@ async function loadMap(securityCode = '') {
     }
     activeKey=config.mapKey; $('security-form').hidden=true;
     await loadSdk(config.mapKey);
-    if(map) {cameraMarkers.forEach(m=>m.setMap(null)); cameraMarkers=[]; junctionMarkers.forEach(m=>m.setMap(null)); junctionMarkers=[]; map.destroy(); centerMarker=null; accuracyCircle=null;}
+    if(map) {clearRoute();cameraMarkers.forEach(m=>m.setMap(null)); cameraMarkers=[]; junctionMarkers.forEach(m=>m.setMap(null)); junctionMarkers=[]; map.destroy(); centerMarker=null; accuracyCircle=null;}
     geocoder = new AMap.Geocoder({radius:300, extensions:'all'});
     map=new AMap.Map('map',{zoom:10,center:[116.397428,39.90923],viewMode:'2D',rotation:0,rotationEnable:false,pitchEnable:false});
     map.on('zoomend',renderMapMarkers);
-    map.on('click',e=>{ if(choosing) { choosing=false; $('map-instruction').hidden=true; setCenter({lng:e.lnglat.lng,lat:e.lnglat.lat},'manual'); } });
+    map.on('click',e=>{
+      if(routePick) {
+        clearRoute(); $('route-'+routePick).value=`${e.lnglat.lng.toFixed(6)},${e.lnglat.lat.toFixed(6)}`;
+        routePick=''; $('map-instruction').hidden=true; setPanel('route',true);
+        $('route-status').textContent='起终点已更新，请点击规划路线。'; return;
+      }
+      if(choosing) { choosing=false; $('map-instruction').hidden=true; setCenter({lng:e.lnglat.lng,lat:e.lnglat.lat},'manual'); }
+    });
     if (!usesProxy) saveCode(config.mapKey,code);
     if(center) setCenter(center,following?'gps':'manual',center.accuracy); else render();
     return true;
@@ -307,6 +375,8 @@ async function loadData(refresh=false) {
     const data=await response.json();
     if(!response.ok && !data.fetchedAt) throw Error(data.warning || '数据加载失败，请稍后刷新重试。');
     cameras=data.cameras;
+    cameraVersion++;
+    if(routePlan && !routeBusy) { clearRoute(); $('route-status').textContent='探头数据已更新，请重新规划路线。'; }
     $('data-time').textContent=`应用获取时间：${new Date(data.fetchedAt).toLocaleString('zh-CN')}${data.stale?'（旧缓存）':''}`;
     $('notice').textContent=[data.warning, '来源坐标系尚未核验，地图位置仅供参考。'].filter(Boolean).join(' ');
     $('data-indicator').hidden=!data.warning && !data.stale;
@@ -323,18 +393,26 @@ function clearSecurity() {
   // AMap retains authentication state in its SDK: reload before using a new code.
   location.reload();
 }
-for (const name of ['list','settings']) {
+for (const name of ['list','settings','route']) {
   $('toggle-'+name).addEventListener('click',()=>setPanel(name,$('toggle-'+name).getAttribute('aria-expanded') !== 'true'));
   $('close-'+name).addEventListener('click',()=>{setPanel(name,false);$('toggle-'+name).focus();});
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')setPanel('',false);});
 $('radius').addEventListener('change',render);
+$('route-start').addEventListener('click',()=>planRoute());
+$('route-continue').addEventListener('click',()=>planRoute(true));
+$('route-clear').addEventListener('click',()=>{clearRoute();$('route-status').textContent='路线已清除。';});
+for(const which of ['origin','destination']) {
+  $('route-pick-'+which).addEventListener('click',()=>pickRoutePoint(which));
+  $('route-'+which).addEventListener('input',()=>{clearRoute();$('route-status').textContent='起终点已更改，请重新规划。';});
+}
+$('route-current').addEventListener('click',()=>{if(!center){$('route-status').textContent='请先定位或选择查询中心。';return;}clearRoute();$('route-origin').value=`${center.lng.toFixed(6)},${center.lat.toFixed(6)}`;});
 $('junction-enabled').addEventListener('change',render);
 $('refresh').addEventListener('click',()=>loadData(true));
 $('locate').addEventListener('click',locate);
 $('recenter').addEventListener('click',locate);
-$('select').addEventListener('click',()=>{ if(!map) return; setPanel('',false); choosing=true; $('map-instruction').hidden=false; });
-$('cancel-select').addEventListener('click',()=>{choosing=false;$('map-instruction').hidden=true;});
+$('select').addEventListener('click',()=>{ if(!map) return; routePick=''; setPanel('',false); choosing=true; $('instruction-text').textContent='点击地图选择查询中心'; $('map-instruction').hidden=false; });
+$('cancel-select').addEventListener('click',()=>{choosing=false;const wasRoute=!!routePick;routePick='';$('map-instruction').hidden=true;if(wasRoute)setPanel('route',true);});
 $('retry-map').addEventListener('click',async()=>{ if(await loadMap()) locate(); });
 $('change-security').addEventListener('click',clearSecurity);
 $('clear-security').addEventListener('click',clearSecurity);
