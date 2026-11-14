@@ -17,6 +17,26 @@ let junctionMarkers = [], junctionGroups = [], selectedJunction = null, selected
 let routeEnabled = false, routeMaxRegions = 32, routeBusy = false, routePick = '', routePlan = null, routeOverlays = [], cameraVersion = 0, routeVersion = 0;
 // Keep labels separate from coordinates; editing a label invalidates its selection.
 const routePlaces = Object.fromEntries(['origin','destination'].map(which=>[which,{version:0,timer:null,selection:null}]));
+const routePointMarkers = {origin:null,destination:null};
+function removeRoutePointMarker(which) {
+  routePointMarkers[which]?.setMap(null);
+  routePointMarkers[which]=null;
+}
+function showRoutePointMarker(which, fit=false) {
+  removeRoutePointMarker(which);
+  if(!map) return;
+  let point;
+  try { point=routePoint(which); } catch { return; }
+  const name=which==='origin'?'起点 A':'终点 B';
+  const content=document.createElement('div');
+  content.className='route-point-marker '+which;
+  const badge=document.createElement('b'), label=document.createElement('span');
+  badge.textContent=which==='origin'?'A':'B';
+  label.textContent=`${name} · ${$('route-'+which).value.trim()}`;
+  content.append(badge); content.append(label);
+  routePointMarkers[which]=new AMap.Marker({map,position:[point.lng,point.lat],content,anchor:'bottom-center',zIndex:220,title:label.textContent});
+  if(fit) map.setFitView(Object.values(routePointMarkers).filter(Boolean),false,[100,100,80,80],16);
+}
 function cancelPlaceSearch(which) {
   const state=routePlaces[which];
   state.version++; clearTimeout(state.timer);
@@ -33,6 +53,7 @@ function setRoutePoint(which, point, label='') {
   $('route-'+which).value=value;
   $('route-'+which+'-search-status').textContent=label ? `已选择：${point.lng.toFixed(6)},${point.lat.toFixed(6)}` : '';
   $('route-status').textContent='起终点已更新，请点击规划路线。';
+  showRoutePointMarker(which,true);
 }
 function routePoint(which) {
   const value=$('route-'+which).value.trim(), selection=routePlaces[which].selection;
@@ -43,6 +64,7 @@ function routePoint(which) {
 function searchRoutePlaces(which) {
   const version=cancelPlaceSearch(which), state=routePlaces[which];
   state.selection=null; clearRoute();
+  showRoutePointMarker(which,true);
   const keyword=$('route-'+which).value.trim(), status=$('route-'+which+'-search-status');
   $('route-status').textContent='起终点已更改，请重新选择地点并规划。';
   if(!keyword) return;
@@ -66,7 +88,7 @@ function searchRoutePlaces(which) {
         button.textContent=[poi.name,poi.cityname,poi.adname,typeof poi.address==='string'?poi.address:''].filter(Boolean).join(' · ');
         button.addEventListener('click',()=>{
           if(routeBusy || version!==state.version) return;
-          setRoutePoint(which,point,poi.name); map.panTo([point.lng,point.lat]);
+          setRoutePoint(which,point,poi.name);
         });
         list.append(button);
       }
@@ -112,8 +134,7 @@ function drawRoute(plan) {
   routeOverlays.forEach(m=>m.setMap(null)); routeOverlays=[];
   if(plan.reason!=='success' || plan.hits.length || !plan.route) return;
   for (const path of plan.route.paths) routeOverlays.push(new AMap.Polyline({map,path,strokeColor:'#245641',strokeWeight:6,strokeOpacity:.85}));
-  for (const [p,title] of [[plan.origin,'起点 A'],[plan.destination,'终点 B']]) routeOverlays.push(new AMap.Marker({map,position:[p.lng,p.lat],title}));
-  map.setFitView(routeOverlays);
+  map.setFitView([...routeOverlays,...Object.values(routePointMarkers).filter(Boolean)]);
 }
 function routeSummary(plan) {
   const reasons={endpoint:'起点或终点落入所需避让区域，请调整位置。',success:'已找到避开当前已知摄像头区域的路线。',budget:'已达到本轮规划次数上限，仍未找到符合条件的路线。',time:'已达到本轮时间上限，仍未找到符合条件的路线。',regions:'已达到本站避让区域数量上限，仍未找到符合条件的路线。',unchanged:'路线重复或避让未生效，已停止重算。'};
@@ -125,6 +146,7 @@ async function planRoute(continuing = false) {
   if(!cameras.length) { reportRoute('探头数据未加载，请在设置中刷新后再试。');return; }
   try {
     const origin=routePoint('origin'), destination=routePoint('destination');
+    for(const which of ['origin','destination']) showRoutePointMarker(which);
     if(!continuing || !routePlan || routeVersion!==cameraVersion || JSON.stringify(origin)!==JSON.stringify(routePlan.origin) || JSON.stringify(destination)!==JSON.stringify(routePlan.destination)) {
       clearRoute(); routePlan=createPlan(origin,destination,cameras,routeMaxRegions); routeVersion=cameraVersion;
     }
@@ -440,7 +462,7 @@ async function loadMap(securityCode = '') {
     activeKey=config.mapKey; $('security-form').hidden=true;
     await loadSdk(config.mapKey);
     for(const which of ['origin','destination']) cancelPlaceSearch(which);
-    if(map) {clearRoute();cameraMarkers.forEach(m=>m.setMap(null)); cameraMarkers=[]; junctionMarkers.forEach(m=>m.setMap(null)); junctionMarkers=[]; map.destroy(); centerMarker=null; accuracyCircle=null;}
+    if(map) {clearRoute();for(const which of ['origin','destination']) removeRoutePointMarker(which);cameraMarkers.forEach(m=>m.setMap(null)); cameraMarkers=[]; junctionMarkers.forEach(m=>m.setMap(null)); junctionMarkers=[]; map.destroy(); centerMarker=null; accuracyCircle=null;}
     geocoder = new AMap.Geocoder({radius:300, extensions:'all'});
     map=new AMap.Map('map',{zoom:10,center:[116.397428,39.90923],viewMode:'2D',rotation:0,rotationEnable:false,pitchEnable:false});
     map.on('zoomend',renderMapMarkers);
@@ -454,6 +476,7 @@ async function loadMap(securityCode = '') {
     });
     if (!usesProxy) saveCode(config.mapKey,code);
     if(center) setCenter(center,following?'gps':'manual',center.accuracy); else render();
+    for(const which of ['origin','destination']) showRoutePointMarker(which,true);
     return true;
   } catch(e) {
     $('security-form').hidden=true; $('map-error-text').textContent=e.message; $('map-error').hidden=false;

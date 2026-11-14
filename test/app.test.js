@@ -93,7 +93,7 @@ function page({store = new Map(), blocked = false, proxy = false, sdkFailure = f
   const apiRequests = [], markers = [], watches = [], cleared = [], documentEvents = {}, windowEvents = {}, intervals = [];
   const geolocation = {watchPosition(success,error,options){watches.push({success,error,options});return watches.length;},clearWatch(id){cleared.push(id);}};
   const amap = {
-    Map: class { constructor(_id,options){maps++;this.events={};this.zoom=options.zoom;} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} panTo(){} setFitView(){} setZoomAndCenter(zoom){this.zoom=zoom;} getZoom(){return this.zoom;} },
+    Map: class { constructor(_id,options){maps++;this.events={};this.zoom=options.zoom;} on(name,cb){this.events[name]=cb;} destroy(){} remove(){} panTo(){} setFitView(overlays){this.fitOverlays=overlays;} setZoomAndCenter(zoom){this.zoom=zoom;} getZoom(){return this.zoom;} },
     Geocoder: class { getAddress(_position, cb) {requests++; cb('complete',{regeocode:{roads:[{name:'北四环辅路',distance:10}],crosses:[]}});} },
     Marker: class {constructor(options){this.options=options; markers.push(this);} setMap(map){this.removed=!map;}}, Polyline:class {setMap(){}}, Circle: class {}, Pixel: class {},
   };
@@ -406,6 +406,8 @@ test('地点搜索丢弃过期结果，选择后使用坐标，编辑或地图�
   assert.equal(list.children.length,1);
   list.children[0].events.click();
   assert.equal(input.value,'北京南站');
+  assert.equal(vm.runInContext('routePointMarkers.origin.options.position[0]',p.context),116.378);
+  assert.equal(vm.runInContext('routePointMarkers.origin.options.content.children[0].textContent',p.context),'A');
   assert.equal(vm.runInContext("routePoint('origin').lng",p.context),116.378);
   input.value='新名称';input.events.input();
   assert.throws(()=>vm.runInContext("routePoint('origin')",p.context),/从搜索结果选择/);
@@ -422,6 +424,7 @@ test('起终点当前位置独立于查询中心，拒绝与迟到定位不覆�
   p.context.navigator.geolocation.getCurrentPosition=success=>success({coords:{longitude:116.414,latitude:39.914}});
   await p.elements.get('route-location-destination').events.click();
   assert.equal(p.elements.get('route-destination').value,'当前位置');
+  assert.equal(vm.runInContext('routePointMarkers.destination.options.content.children[0].textContent',p.context),'B');
   assert.equal(vm.runInContext("routePoint('destination').lng",p.context),116.42);
   assert.equal(vm.runInContext('center.lng',p.context),116.6);
   await p.elements.get('route-location-origin').events.click();
@@ -451,4 +454,32 @@ test('地点搜索失败及空结果有提示，取消后不显示迟到结果',
   vm.runInContext("cancelPlaceSearch('destination');routeBusy=true",p.context);
   deliver('complete',{poiList:{pois:[{name:'迟到',location:{lng:116.4,lat:39.9}}]}});
   assert.equal(p.elements.get('route-destination-results').hidden,true);
+});
+
+
+test('起终点选择立即显示地点标记，更换、编辑、清除路线及重新加载正确管理标记',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  const markers=()=>p.markers.filter(m=>!m.removed&&m.options.content?.className.startsWith('route-point-marker'));
+  vm.runInContext("setRoutePoint('origin',{lng:116.3,lat:39.9},'北京西站');setRoutePoint('destination',{lng:116.5,lat:39.95},'<地点>');",p.context);
+  assert.equal(markers().length,2);
+  assert.equal(markers()[0].options.title,'起点 A · 北京西站');
+  assert.equal(markers()[1].options.content.children[1].textContent,'终点 B · <地点>');
+  assert.equal(vm.runInContext('map.fitOverlays.length',p.context),2);
+  const old=markers()[0];
+  vm.runInContext("setRoutePoint('origin',{lng:116.35,lat:39.92},'新起点')",p.context);
+  assert.equal(old.removed,true);assert.equal(markers().length,2);
+  p.elements.get('route-clear').events.click();assert.equal(markers().length,2);
+  p.elements.get('route-origin').value='';p.elements.get('route-origin').events.input();
+  assert.equal(markers().length,1);
+  p.elements.get('route-origin').value='116.36,39.93';p.elements.get('route-origin').events.input();
+  assert.equal(markers().length,2);
+  assert.equal(vm.runInContext('routePointMarkers.origin.options.position[0]',p.context),116.36);
+  const beforeReload=markers();assert.equal(await p.client.loadMap(),true);
+  assert.ok(beforeReload.every(m=>m.removed));assert.equal(markers().length,2);
+  vm.runInContext("routeEnabled=true;cameras=[{lng:116.4,lat:39.9}]",p.context);
+  p.context.fetch=async()=>({ok:false,json:async()=>({error:'模拟规划失败'})});
+  await p.client.planRoute();
+  assert.equal(markers().length,2);
+  assert.equal(vm.runInContext('routeOverlays.length',p.context),0);
+  assert.match(p.elements.get('route-status').textContent,/模拟规划失败/);
 });
