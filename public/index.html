@@ -19,18 +19,22 @@
   <section id="route-panel" class="panel" aria-labelledby="route-heading" hidden>
     <div class="panel-heading"><h2 id="route-heading">避让路线规划</h2><button id="close-route" class="icon-button" aria-label="收起路线规划">×</button></div>
     <div class="settings-body route-body">
-      <label for="route-origin">起点 A · 经度,纬度</label>
-      <input id="route-origin" placeholder="在地图上选点或输入坐标" autocomplete="off">
-      <div class="control-row"><button id="route-current" class="button">使用查询中心</button><button id="route-pick-origin" class="button">地图选起点</button></div>
-      <label for="route-destination">终点 B · 经度,纬度</label>
-      <input id="route-destination" placeholder="例如 116.40,39.90" autocomplete="off">
-      <button id="route-pick-destination" class="button full-width">地图选终点</button>
+      <label for="route-origin">起点 A</label>
+      <input id="route-origin" placeholder="搜索地点名称或输入经度,纬度" aria-describedby="route-origin-search-status" autocomplete="off">
+      <small id="route-origin-search-status" class="place-status" role="status" aria-live="polite"></small>
+      <div id="route-origin-results" class="place-results" aria-label="地点搜索结果" hidden></div>
+      <div class="control-row"><button id="route-location-origin" class="button">当前位置</button><button id="route-current" class="button">使用查询中心</button><button id="route-pick-origin" class="button">地图选起点</button></div>
+      <label for="route-destination">终点 B</label>
+      <input id="route-destination" placeholder="搜索地点名称或输入经度,纬度" aria-describedby="route-destination-search-status" autocomplete="off">
+      <small id="route-destination-search-status" class="place-status" role="status" aria-live="polite"></small>
+      <div id="route-destination-results" class="place-results" aria-label="地点搜索结果" hidden></div>
+      <div class="control-row"><button id="route-location-destination" class="button">当前位置</button><button id="route-pick-destination" class="button">地图选终点</button></div>
       <p>检查全部已加载原始点位周围 40 米，发现沿线点位后批量累积避让。每次最多请求 5 次；相同规划请求缓存 60 秒，规划中禁止重复提交。</p>
       <p id="route-limits">避让区域上限等待配置加载。</p>
       <div class="control-row"><button id="route-start" class="button primary">规划路线</button><button id="route-clear" class="button">清除路线</button></div>
       <p id="route-status" role="status" aria-live="polite">请先选择起点和终点。</p>
       <button id="route-continue" class="button full-width" hidden>继续尝试（最多再请求 5 次）</button>
-      <p>仅提供路线预览，不会随移动自动重算。来源坐标、车道及高架层级尚未核验；未发现已知点位不代表实际没有摄像头，也不代表道路允许通行。起终点和避让区域会经本站发送给高德，本站仅短时内存缓存。</p>
+      <p>仅提供路线预览，不会随移动自动重算。来源坐标、车道及高架层级尚未核验；未发现已知点位不代表实际没有摄像头，也不代表道路允许通行。地点搜索关键词会发送给高德；起终点和避让区域会经本站发送给高德，本站仅短时内存缓存。</p>
     </div>
   </section>
   <section id="settings-panel" class="panel settings-panel" aria-labelledby="settings-heading" hidden>

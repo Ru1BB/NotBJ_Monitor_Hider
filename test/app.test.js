@@ -387,3 +387,68 @@ test('切回前台恢复监听，旧位置和定位异常明确提示且可恢�
   assert.equal(vm.runInContext('following',p.context),false);
   assert.deepEqual(p.cleared,[1,2]);
 });
+
+
+test('地点搜索丢弃过期结果，选择后使用坐标，编辑或地图选点清理选择',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  const pending=[];
+  p.context.AMap.PlaceSearch=class {search(keyword,callback){pending.push({keyword,callback});}};
+  const input=p.elements.get('route-origin'), list=p.elements.get('route-origin-results');
+  input.value='北京站';input.events.input();
+  await new Promise(resolve=>setTimeout(resolve,380));
+  assert.equal(pending[0].keyword,'北京站');
+  input.value='北京南站';input.events.input();
+  pending[0].callback('complete',{poiList:{pois:[{name:'旧结果',location:{lng:116.4,lat:39.9}}]}});
+  assert.equal(list.children.length,0);
+  await new Promise(resolve=>setTimeout(resolve,380));
+  assert.equal(pending.length,2);
+  pending[1].callback('complete',{poiList:{pois:[{name:'北京南站',address:'永外大街',location:{lng:116.378,lat:39.865}},{name:'外地',location:{lng:121,lat:31}}]}});
+  assert.equal(list.children.length,1);
+  list.children[0].events.click();
+  assert.equal(input.value,'北京南站');
+  assert.equal(vm.runInContext("routePoint('origin').lng",p.context),116.378);
+  input.value='新名称';input.events.input();
+  assert.throws(()=>vm.runInContext("routePoint('origin')",p.context),/从搜索结果选择/);
+  p.client.pickRoutePoint('origin');
+  vm.runInContext('map.events.click({lnglat:{lng:116.5,lat:39.9}})',p.context);
+  assert.equal(input.value,'116.500000,39.900000');
+  assert.equal(vm.runInContext("routePoint('origin').lng",p.context),116.5);
+});
+
+test('起终点当前位置独立于查询中心，拒绝与迟到定位不覆盖新选点',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  p.client.setCenter({lng:116.6,lat:40},'manual');
+  p.context.AMap.convertFrom=(_point,_type,cb)=>cb('complete',{locations:[{lng:116.42,lat:39.92}]});
+  p.context.navigator.geolocation.getCurrentPosition=success=>success({coords:{longitude:116.414,latitude:39.914}});
+  await p.elements.get('route-location-destination').events.click();
+  assert.equal(p.elements.get('route-destination').value,'当前位置');
+  assert.equal(vm.runInContext("routePoint('destination').lng",p.context),116.42);
+  assert.equal(vm.runInContext('center.lng',p.context),116.6);
+  await p.elements.get('route-location-origin').events.click();
+  assert.equal(p.elements.get('route-origin').value,'当前位置');
+  p.context.navigator.geolocation.getCurrentPosition=(_success,error)=>error({code:1});
+  await p.elements.get('route-location-destination').events.click();
+  assert.match(p.elements.get('route-destination-search-status').textContent,/权限被拒绝/);
+  let deliver;
+  p.context.navigator.geolocation.getCurrentPosition=success=>{deliver=success;};
+  const locating=p.elements.get('route-location-destination').events.click();
+  p.client.pickRoutePoint('destination');
+  vm.runInContext('map.events.click({lnglat:{lng:116.55,lat:39.95}})',p.context);
+  deliver({coords:{longitude:116.414,latitude:39.914}});await locating;
+  assert.equal(p.elements.get('route-destination').value,'116.550000,39.950000');
+});
+
+test('地点搜索失败及空结果有提示，取消后不显示迟到结果',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  let deliver;
+  p.context.AMap.PlaceSearch=class {search(_keyword,callback){deliver=callback;}};
+  const input=p.elements.get('route-destination'),status=p.elements.get('route-destination-search-status');
+  input.value='地点';input.events.input();await new Promise(resolve=>setTimeout(resolve,380));
+  deliver('error');assert.match(status.textContent,/搜索失败/);
+  input.events.input();await new Promise(resolve=>setTimeout(resolve,380));
+  deliver('no_data');assert.match(status.textContent,/未找到/);
+  input.events.input();await new Promise(resolve=>setTimeout(resolve,380));
+  vm.runInContext("cancelPlaceSearch('destination');routeBusy=true",p.context);
+  deliver('complete',{poiList:{pois:[{name:'迟到',location:{lng:116.4,lat:39.9}}]}});
+  assert.equal(p.elements.get('route-destination-results').hidden,true);
+});
