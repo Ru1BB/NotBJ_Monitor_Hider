@@ -1,5 +1,5 @@
 // Shared Node/Worker adapter. Coordinates stay in bounded short-lived memory only.
-export const routeLimits = env => Math.max(1,Math.min(32,Number.parseInt(env.AMAP_ROUTE_MAX_REGIONS,10)||1));
+export const routeLimits = env => Math.max(1,Math.min(32,Number.parseInt(env.AMAP_ROUTE_MAX_REGIONS,10)||32));
 export function createRouteService({fetcher = (...args)=>fetch(...args), now = ()=>Date.now()} = {}) {
   const cache = new Map(), pending = new Map();
   const fail = (message,status=400) => Object.assign(Error(message),{status});

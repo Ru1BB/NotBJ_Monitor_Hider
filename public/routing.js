@@ -58,12 +58,12 @@ export async function runPlan(plan, request, onProgress = () => {}, budget = 5) 
     for (const c of plan.hits) {
       const key = cameraKey(c);
       if (plan.areas.has(key)) continue;
-      if (plan.areas.size >= plan.maxRegions) { plan.reason='regions'; return plan; }
+      if (plan.areas.size >= plan.maxRegions) break;
       const box=avoidBox(c);
       if([plan.origin,plan.destination].some(p=>p.lng>=box[0][0] && p.lng<=box[2][0] && p.lat>=box[0][1] && p.lat<=box[2][1])) {plan.reason='endpoint';return plan;}
       plan.areas.set(key,box); added++;
     }
-    if (!added) { plan.reason='unchanged'; return plan; }
+    if (!added) { plan.reason=plan.areas.size>=plan.maxRegions?'regions':'unchanged'; return plan; }
     if (Date.now()-started>=45000) { plan.reason='time'; plan.resumable=true; return plan; }
   }
   plan.reason='budget'; plan.resumable=true; return plan;

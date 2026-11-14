@@ -36,8 +36,14 @@ test('区域上限、起终点冲突、无数据提前停止',async()=>{
   assert.throws(()=>createPlan(origin,destination,[]),/数据/);
   assert.throws(()=>createPlan(origin,destination,[origin]),/起点或终点/);
   const p=createPlan(origin,destination,cameras,1);
-  await runPlan(p,async()=>({route:direct,cached:false}));
-  assert.equal(p.reason,'regions');assert.equal(p.calls,1);assert.equal(p.resumable,false);
+  let calls=0;
+  await runPlan(p,async()=>({route:calls++===0?direct:detour,cached:false}));
+  assert.equal(p.reason,'regions');assert.equal(p.calls,2);assert.equal(p.resumable,false);
+});
+test('区域已满仍先尝试已添加的约束，一个区域也可能绕开多个摄像头',async()=>{
+  const p=createPlan(origin,destination,cameras,1);let calls=0;
+  await runPlan(p,async input=>{assert.equal(input.polygons.length,calls);return {route:calls++===0?direct:safe,cached:false};});
+  assert.equal(p.reason,'success');assert.equal(p.calls,2);assert.equal(p.areas.size,1);
 });
 test('默认最多五轮，新点位逐轮累积；续算不会重新发普通路线',async()=>{
   const points=Array.from({length:6},(_,i)=>({lng:116.4,lat:39.905+i*.005}));

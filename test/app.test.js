@@ -16,6 +16,24 @@ const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8'
   .replace('loadData(); loadMap().then(loaded=>{ if(loaded) locate(); });', '');
 const SESSION_KEY = 'jingtu.amap.session';
 
+test('未通过避让检查绝不绘制行驶路线，关面板后仍能查看失败原因',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  p.elements.get('route-origin').value='116.3,39.9';p.elements.get('route-destination').value='116.5,39.9';
+  vm.runInContext('routeEnabled=true;routeMaxRegions=1;cameras=[{lng:116.4,lat:39.9},{lng:116.45,lat:39.9}]',p.context);
+  let drawings=0,calls=0;
+  p.context.AMap.Polyline=class {constructor(){drawings++;}setMap(){}};
+  p.context.fetch=async()=>{calls++;return {ok:true,json:async()=>({cached:false,route:{paths:[[[116.3,39.9],[116.5,39.9]]],distance:18000,duration:1000}})};};
+  await p.client.planRoute();
+  assert.equal(calls,2);assert.equal(drawings,0);
+  assert.equal(vm.runInContext('routeOverlays.length',p.context),0);
+  assert.match(p.elements.get('route-status').textContent,/未显示该路线/);
+  assert.doesNotMatch(p.elements.get('route-status').textContent,/路程|预计/);
+  p.client.setPanel('route',false);
+  assert.equal(p.elements.get('route-result').hidden,false);
+  assert.match(p.elements.get('route-result').textContent,/未找到避让路线/);
+  p.elements.get('route-result').events.click();assert.equal(p.elements.get('route-panel').hidden,false);
+});
+
 test('路线地图选点不发送查询；重复提交合并，成功及修改端点状态正确',async()=>{
   const p=page({proxy:true});await p.client.loadMap();
   p.client.pickRoutePoint('origin');

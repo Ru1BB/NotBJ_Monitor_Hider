@@ -14,27 +14,34 @@ let map, cameraMarkers = [], centerMarker, accuracyCircle, currentPosition, cent
 let cameras = [], visible = [], selected = null, choosing = false, loadingMap = false;
 let activeCode = '', activeKey = '', usesProxy = false;
 let junctionMarkers = [], junctionGroups = [], selectedJunction = null, selectedJunctionMembers = [];
-let routeEnabled = false, routeMaxRegions = 1, routeBusy = false, routePick = '', routePlan = null, routeOverlays = [], cameraVersion = 0, routeVersion = 0;
+let routeEnabled = false, routeMaxRegions = 32, routeBusy = false, routePick = '', routePlan = null, routeOverlays = [], cameraVersion = 0, routeVersion = 0;
 function clearRoute() {
   routePlan = null;
   routeOverlays.forEach(m=>m.setMap(null)); routeOverlays=[];
   $('route-continue').hidden=true;
+  $('route-result').hidden=true;
+}
+function reportRoute(message, state='failure') {
+  $('route-status').textContent=message;
+  $('route-result').hidden=false;
+  $('route-result').setAttribute('data-state',state);
+  $('route-result').textContent=(state==='success'?'已找到通过检查的避让路线':state==='pending'?'正在规划与检查路线…':'未找到避让路线，未显示行驶路线')+' · 查看详情';
 }
 function drawRoute(plan) {
   routeOverlays.forEach(m=>m.setMap(null)); routeOverlays=[];
-  const safe = plan.reason==='success';
-  for (const path of plan.route.paths) routeOverlays.push(new AMap.Polyline({map,path,strokeColor:safe?'#245641':'#b57927',strokeWeight:6,strokeOpacity:.85}));
+  if(plan.reason!=='success' || plan.hits.length || !plan.route) return;
+  for (const path of plan.route.paths) routeOverlays.push(new AMap.Polyline({map,path,strokeColor:'#245641',strokeWeight:6,strokeOpacity:.85}));
   for (const [p,title] of [[plan.origin,'起点 A'],[plan.destination,'终点 B']]) routeOverlays.push(new AMap.Marker({map,position:[p.lng,p.lat],title}));
   map.setFitView(routeOverlays);
 }
 function routeSummary(plan) {
   const reasons={endpoint:'起点或终点落入所需避让区域，请调整位置。',success:'已找到避开当前已知摄像头区域的路线。',budget:'已达到本轮规划次数上限，仍未找到符合条件的路线。',time:'已达到本轮时间上限，仍未找到符合条件的路线。',regions:'已达到本站避让区域数量上限，仍未找到符合条件的路线。',unchanged:'路线重复或避让未生效，已停止重算。'};
-  return `${reasons[plan.reason]} 累计发起 ${plan.calls} 次高德请求，复用 ${plan.cacheHits} 次缓存或并发结果；已累积 ${plan.areas.size} 个避让区域。${plan.route?` 路程 ${(plan.route.distance/1000).toFixed(1)} 公里，预计 ${Math.ceil(plan.route.duration/60)} 分钟。`:''}${plan.hits.length?` 当前参考路线仍接近 ${plan.hits.length} 条已知点位记录，橙色路线未通过避让检查。`:''}`;
+  return `${reasons[plan.reason]} 累计发起 ${plan.calls} 次高德请求，复用 ${plan.cacheHits} 次缓存或并发结果；已累积 ${plan.areas.size} / ${plan.maxRegions} 个避让区域。${plan.route && plan.reason==='success'?` 路程 ${(plan.route.distance/1000).toFixed(1)} 公里，预计 ${Math.ceil(plan.route.duration/60)} 分钟。`:''}${plan.hits.length?` 最后一次检查仍接近 ${plan.hits.length} 条已知点位记录，未显示该路线。`:''}`;
 }
 async function planRoute(continuing = false) {
   if(routeBusy) return;
-  if(!map || !routeEnabled) { $('route-status').textContent='请先加载地图；站点须配置高德 Web 服务 Key 才能规划路线。';return; }
-  if(!cameras.length) { $('route-status').textContent='探头数据未加载，请在设置中刷新后再试。';return; }
+  if(!map || !routeEnabled) { reportRoute('请先加载地图；站点须配置高德 Web 服务 Key 才能规划路线。');return; }
+  if(!cameras.length) { reportRoute('探头数据未加载，请在设置中刷新后再试。');return; }
   try {
     const origin=parsePoint($('route-origin').value), destination=parsePoint($('route-destination').value);
     if(!continuing || !routePlan || routeVersion!==cameraVersion || JSON.stringify(origin)!==JSON.stringify(routePlan.origin) || JSON.stringify(destination)!==JSON.stringify(routePlan.destination)) {
@@ -42,6 +49,7 @@ async function planRoute(continuing = false) {
     }
     if(continuing && !routePlan.resumable) return;
     const plan=routePlan;
+    routeOverlays.forEach(m=>m.setMap(null)); routeOverlays=[];
     routeBusy=true; routePick=''; choosing=false; $('map-instruction').hidden=true;
     $('route-continue').hidden=true;
     for(const id of ['route-start','route-current','route-pick-origin','route-pick-destination','route-clear','route-origin','route-destination','refresh']) $(id).disabled=true;
@@ -50,15 +58,15 @@ async function planRoute(continuing = false) {
       const result=await response.json();
       if(!response.ok) throw Error(result.error || '路线规划失败，请稍后重试。');
       return result;
-    },p=>{$('route-status').textContent=`正在规划与本地检查… 已发起 ${p.calls} 次高德请求，复用 ${p.cacheHits} 次；累积 ${p.areas.size} 个避让区域。`;});
-    if(routeVersion!==cameraVersion) {clearRoute();$('route-status').textContent='规划期间探头数据已更新，请重新规划。';return;}
+    },p=>{reportRoute(`正在规划与本地检查… 已发起 ${p.calls} 次高德请求，复用 ${p.cacheHits} 次；累积 ${p.areas.size} 个避让区域。`,'pending');});
+    if(routeVersion!==cameraVersion) {clearRoute();reportRoute('规划期间探头数据已更新，请重新规划。');return;}
     drawRoute(plan);
-    $('route-status').textContent=routeSummary(plan);
+    reportRoute(routeSummary(plan),plan.reason==='success'?'success':'failure');
     $('route-continue').hidden=!plan.resumable;
   } catch(e) {
     routeOverlays.forEach(m=>m.setMap(null)); routeOverlays=[];
     $('route-continue').hidden=true;
-    $('route-status').textContent=`${e.message} 本次未取得通过避让检查的路线。`;
+    reportRoute(`${e.message} 本次未取得通过避让检查的路线。`);
   } finally {
     routeBusy=false;
     for(const id of ['route-start','route-current','route-pick-origin','route-pick-destination','route-clear','route-origin','route-destination','refresh']) $(id).disabled=false;
@@ -331,7 +339,7 @@ async function loadMap(securityCode = '') {
     const response=await fetch(appUrl('api/config'),{cache:'no-store'});
     if (!response.ok) throw Error('地图配置获取失败，请重试。');
     const config=await response.json();
-    routeEnabled=!!config.routingEnabled; routeMaxRegions=config.routeMaxRegions||1;
+    routeEnabled=!!config.routingEnabled; routeMaxRegions=config.routeMaxRegions||32;
     $('route-limits').textContent=`本站单次最多支持 ${routeMaxRegions} 个避让区域。`;
     if(!routeEnabled) $('route-status').textContent='路线规划尚未配置 Web 服务 Key，请联系站点管理员。';
     if(!config.mapKey) throw Error('尚未配置高德 JS API Key，请参照 README 配置。');
@@ -400,6 +408,7 @@ for (const name of ['list','settings','route']) {
 document.addEventListener('keydown',e=>{if(e.key==='Escape')setPanel('',false);});
 $('radius').addEventListener('change',render);
 $('route-start').addEventListener('click',()=>planRoute());
+$('route-result').addEventListener('click',()=>setPanel('route',true));
 $('route-continue').addEventListener('click',()=>planRoute(true));
 $('route-clear').addEventListener('click',()=>{clearRoute();$('route-status').textContent='路线已清除。';});
 for(const which of ['origin','destination']) {

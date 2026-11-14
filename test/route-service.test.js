@@ -1,9 +1,17 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {createRouteService} from '../route-service.js';
+import {createRouteService,routeLimits} from '../route-service.js';
 const env={AMAP_WEB_SERVICE_KEY:'test-only-web-key',AMAP_ROUTE_MAX_REGIONS:'32'};
 const input={origin:{lng:116.3,lat:39.9},destination:{lng:116.5,lat:39.9},polygons:[]};
 const payload={status:'1',route:{paths:[{distance:'18000',cost:{duration:'1000'},steps:[{polyline:'116.3,39.9;116.5,39.9'}]}]}};
+test('按 Web 服务文档允许 32 个区域，33 个在调用高德前拒绝',async()=>{
+  assert.equal(routeLimits({}),32);assert.equal(routeLimits({AMAP_ROUTE_MAX_REGIONS:'99'}),32);
+  let calls=0;
+  const service=createRouteService({fetcher:async(_url,opts)=>{calls++;assert.equal(new URLSearchParams(opts.body).get('avoidpolygons').split('|').length,32);return Response.json(payload);}});
+  const poly=[[116.4,39.91],[116.4001,39.91],[116.4001,39.9101],[116.4,39.9101]];
+  await service({...input,polygons:Array.from({length:32},()=>poly)},{AMAP_WEB_SERVICE_KEY:env.AMAP_WEB_SERVICE_KEY});
+  await assert.rejects(service({...input,polygons:Array.from({length:33},()=>poly)},env),/数量/);assert.equal(calls,1);
+});
 test('相同请求短时缓存，过期重新调用；独立密钥不会共用结果',async()=>{
   let calls=0,now=0;
   const service=createRouteService({now:()=>now,fetcher:async(url,opts)=>{
