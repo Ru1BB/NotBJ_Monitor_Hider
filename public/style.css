@@ -8,3 +8,9 @@
 
 .place-status{display:block;font-size:12px;line-height:1.6;color:#687f6f;overflow-wrap:anywhere}.place-results{max-height:220px;overflow:auto;border:1px solid #dfe7df;border-radius:10px;margin:8px 0}.place-result{display:block;width:100%;min-height:44px;padding:12px;border:0;border-bottom:1px solid #e8eee7;background:#fff;text-align:left;color:#365c47;font:inherit;font-size:13px;line-height:1.6;overflow-wrap:anywhere}.place-result:last-child{border-bottom:0}.place-result:hover{background:#edf5ec}
 .route-point-marker{position:relative;display:flex;align-items:center;gap:7px;max-width:220px;padding:7px 10px 10px;background:#fff;border:2px solid #245641;border-radius:12px;box-shadow:0 3px 12px #17352635;color:#245641;font-size:12px;line-height:1.5;white-space:nowrap}.route-point-marker::after{content:'';position:absolute;left:50%;bottom:-7px;width:10px;height:10px;background:#fff;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:translateX(-50%) rotate(45deg)}.route-point-marker b{display:grid;place-items:center;flex:none;width:25px;height:25px;border-radius:50%;background:#245641;color:#fff;font-size:14px}.route-point-marker span{overflow:hidden;text-overflow:ellipsis}.route-point-marker.destination{border-color:#b45b2e;color:#b45b2e}.route-point-marker.destination b{background:#b45b2e}
+
+.dot.permit-outer{background:#3984c6}
+
+.passage-status.allowed{color:#257441}.passage-status.blocked{color:#ad3d32}
+
+#permit-status,#peak-status{display:block;width:100%;min-width:0;padding:10px;color:#365c47;border:1px solid #dfe7df;background:#fff;border-radius:9px;margin-bottom:12px}

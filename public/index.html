@@ -29,7 +29,7 @@
       <small id="route-destination-search-status" class="place-status" role="status" aria-live="polite"></small>
       <div id="route-destination-results" class="place-results" aria-label="地点搜索结果" hidden></div>
       <div class="control-row"><button id="route-location-destination" class="button">当前位置</button><button id="route-pick-destination" class="button">地图选终点</button></div>
-      <p>检查全部已加载原始点位周围 40 米，发现沿线点位后批量累积避让。每次最多请求 5 次；相同规划请求缓存 60 秒，规划中禁止重复提交。</p>
+      <p>按当前进京证与高峰时段，检查全部已加载受限原始点位周围 40 米（已排除不再拍及当前条件下可通行的探头），发现沿线点位后批量累积避让。每次最多请求 5 次；相同规划请求缓存 60 秒，规划中禁止重复提交。</p>
       <p id="route-limits">避让区域上限等待配置加载。</p>
       <div class="control-row"><button id="route-start" class="button primary">规划路线</button><button id="route-clear" class="button">清除路线</button></div>
       <p id="route-status" role="status" aria-live="polite">请先选择起点和终点。</p>
@@ -40,6 +40,14 @@
   <section id="settings-panel" class="panel settings-panel" aria-labelledby="settings-heading" hidden>
     <div class="panel-heading"><h2 id="settings-heading">地图设置</h2><button id="close-settings" class="icon-button" aria-label="收起设置">×</button></div>
     <div class="settings-body">
+      <label for="permit-status">当前进京证状态</label>
+      <select id="permit-status"><option value="none" selected>未办理 / 已过期</option><option value="outer">已办理六环外进京证（有效期内）</option><option value="inner">已办理六环内进京证（有效期内）</option></select>
+      <label for="peak-status">当前是否为受限高峰时段</label>
+      <select id="peak-status"><option value="auto" selected>按当前时间判断（北京时间）</option><option value="yes">手动：当前为高峰期</option><option value="no">手动：当前为非高峰期</option></select>
+      <p id="peak-clock" role="status" aria-live="polite"></p>
+      <p>自动模式按周一至周五 7:00–9:00、17:00–20:00 判断，不含节假日和调休校正；可手动切换。跨时段自动更新，旧路线失效后需重新规划。</p>
+      <p>按所选证件与时段判断各点位；绿色外圈表示当前条件下可通行，点位底色仍表示进京证类别。路线只避让不可通行或需确认的点位。切换状态后需重新规划。</p>
+      <p>请按实际经过时间选择时段；此判断基于源站分类，不包含尾号、车型、临时管制等其他限制。</p>
       <label for="radius">附近范围</label>
       <div class="control-row"><select id="radius"><option value="1">1 公里</option><option value="3" selected>3 公里</option><option value="5">5 公里</option><option value="10">10 公里</option></select><button id="refresh" class="button">刷新数据</button></div>
       <button id="select" class="button full-width">在地图上选择查询中心</button>
@@ -49,7 +57,7 @@
         <p>紫色小罗盘为合并路口；放大后展开为各个探头小点，缩小后恢复。中央为记录数，亮起方位为探头所在侧。上北下南；空心方位仅表示尚无匹配记录。</p>
         <p id="junction-status" role="status">附近路口查询完成后自动分组；归属不清时保留单点。</p>
       </div>
-      <details><summary>图例与道路判断</summary><div class="legend"><p><i class="dot current"></i>查询中心</p><p><i class="dot major"></i>主路 / 高速 / 高架（推测）</p><p><i class="dot other"></i>辅路 / 地面 / 匝道（推测）</p><p><i class="dot unknown"></i>道路待确认</p></div><p>点击探头查看来源描述、高德附近道路和路口信息。附近道路不能证明探头所属车道或高架层级。</p><p id="road-status">高德道路辅助查询等待地图加载</p></details>
+      <details><summary>进京证分类与道路判断</summary><div class="legend"><p><i class="dot current"></i>查询中心</p><p><i class="dot major"></i>需要六环内进京证</p><p><i class="dot other"></i>早晚高峰限制进京证</p><p><i class="dot permit-outer"></i>需要六环外进京证</p></div><p>早晚高峰类主要包含顺义相关点位；全天需要六环内证的点位归入六环内证类。不再拍的探头（来源类别 4）已忽略，不显示也不参与路线避让。名称中的位置或方向“待确认”不影响进京证分类。合并路口可能含多种类别，放大或点击查看各探头。</p><p>点击探头查看来源描述、高德附近道路和路口信息。附近道路不能证明探头所属车道或高架层级。</p><p id="road-status">高德道路辅助查询等待地图加载</p></details>
       <details><summary>定位与数据说明</summary><p id="location-time"></p><p id="data-time">正在获取数据</p><p id="notice" role="status"></p><p>数据来自 <a href="https://www.jinjing365.com/" target="_blank" rel="noopener noreferrer">进京365 ↗</a>。距离为近似直线距离，来源坐标系尚未核验。</p><p>位置用于本机距离计算；高德地图、GPS 坐标转换和道路查询会访问高德服务。在线转换失败时，北京周边位置会使用本地近似转换并显示提示。</p><p>提供已知点位避让路线预览，尚未实现实时转向导航。</p></details>
       <details><summary>地图密钥</summary><p id="credential-status">手动输入的安全密钥只保留在当前标签页的会话存储中，刷新后自动使用。</p><button id="clear-security" class="button full-width">清除密钥并重新输入</button></details>
     </div>

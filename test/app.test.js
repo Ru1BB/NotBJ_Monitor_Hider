@@ -483,3 +483,108 @@ test('起终点选择立即显示地点标记，更换、编辑、清除路线�
   assert.equal(vm.runInContext('routeOverlays.length',p.context),0);
   assert.match(p.elements.get('route-status').textContent,/模拟规划失败/);
 });
+
+
+test('进京证三分类不受待确认备注影响；类别4从显示和路线输入排除', async()=>{
+  const p=page({proxy:true});
+  await new Promise(resolve=>setImmediate(resolve));
+  await p.client.loadMap();
+  const rows=[
+    {id:'off',name:'不再拍',category:'4',lng:116.4,lat:39.9},
+    {id:'inner',name:'位置待确认',category:'2',lng:116.401,lat:39.9},
+    {id:'inner5',name:'高峰也受限',category:'5',lng:116.402,lat:39.9},
+    {id:'outer',name:'方向待确认',category:'6',lng:116.403,lat:39.9},
+    {id:'peak',name:'顺义高峰',category:'1',lng:116.404,lat:39.9}
+  ];
+  p.context.fetch=async()=>({ok:true,json:async()=>({cameras:rows,fetchedAt:'2026-11-14T00:00:00Z'})});
+  await p.client.loadData();
+  p.client.setCenter({lng:116.4,lat:39.9},'manual');
+  assert.equal(vm.runInContext('cameras.length',p.context),4);
+  assert.equal(vm.runInContext('visible.length',p.context),4);
+  assert.equal(vm.runInContext("cameras.map(c=>permitType(c).label).join('|')",p.context),'需要六环内进京证|需要六环内进京证|需要六环外进京证|早晚高峰限制进京证');
+  // An ignored camera at the origin must not reject a route plan.
+  assert.equal(vm.runInContext('createPlan({lng:116.4,lat:39.9},{lng:116.41,lat:39.9},cameras).cameras.length',p.context),4);
+  const items=p.elements.get('list').children.slice(-4);
+  assert.match(items[0].innerHTML,/需要六环内进京证/);
+  assert.match(items[2].innerHTML,/需要六环外进京证/);
+  assert.match(items[3].innerHTML,/早晚高峰限制进京证/);
+  vm.runInContext('map.zoom=16;renderMapMarkers()',p.context);
+  const dots=p.markers.filter(m=>!m.removed&&m.options.content?.className==='camera-marker');
+  assert.equal(dots.length,4);
+  assert.match(dots.find(m=>m.options.title.includes('方向待确认')).options.content.innerHTML,/#3984c6/);
+  vm.runInContext("showDetail(visible.find(c=>c.id==='outer'))",p.context);
+  assert.match(p.elements.get('detail-body').innerHTML,/需要六环外进京证/);
+});
+
+
+test('持证与手动高峰状态覆盖三类通行矩阵，切换同步更新列表详情和旧路线',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  const check=(permit,peak,code)=>{
+    p.elements.get('permit-status').value=permit;p.elements.get('peak-status').value=peak;
+    return vm.runInContext(`passage({category:'${code}'}).allowed`,p.context);
+  };
+  for(const permit of ['none','outer','inner']) for(const peak of ['yes','no']) {
+    assert.equal(check(permit,peak,'2'),permit==='inner');
+    assert.equal(check(permit,peak,'5'),permit==='inner');
+    assert.equal(check(permit,peak,'6'),permit!=='none');
+    assert.equal(check(permit,peak,'1'),permit!=='none'&&peak==='no');
+  }
+  vm.runInContext("cameras=[{id:'outer',name:'方向待确认',category:'6',lng:116.4,lat:39.9}];",p.context);
+  check('none','no','6');p.client.setCenter({lng:116.41,lat:39.9},'manual');
+  vm.runInContext('showDetail(visible[0]);routePlan={resumable:true};routeOverlays=[new AMap.Polyline({})]',p.context);
+  p.elements.get('permit-status').value='outer';p.elements.get('permit-status').events.change();
+  assert.equal(vm.runInContext('routePlan',p.context),null);
+  assert.equal(vm.runInContext('routeOverlays.length',p.context),0);
+  assert.match(p.elements.get('detail-body').innerHTML,/可通行（按所选/);
+  assert.match(p.elements.get('list').children.at(-1).innerHTML,/可通行（按所选/);
+});
+
+test('自动高峰使用北京时间及半开区间，周末非高峰，自动跨界使旧路线失效',()=>{
+  const p=page();
+  for(const [time,expected] of [
+    ['2026-11-13T06:59:59+08:00',false],['2026-11-13T07:00:00+08:00',true],
+    ['2026-11-13T08:59:59+08:00',true],['2026-11-13T09:00:00+08:00',false],
+    ['2026-11-13T17:00:00+08:00',true],['2026-11-13T20:00:00+08:00',false],
+    ['2026-11-14T08:00:00+08:00',false],['2026-11-13T00:00:00Z',true]
+  ]) assert.equal(vm.runInContext(`peakRestrictedAt(new Date('${time}'))`,p.context),expected,time);
+  p.elements.get('peak-status').value='auto';
+  vm.runInContext("peakRestrictedAt=()=>true;lastAutoPeakStatus='no';routePlan={resumable:true};",p.context);
+  p.intervals.at(-1)();
+  assert.equal(vm.runInContext('routePlan',p.context),null);
+  assert.match(p.elements.get('peak-clock').textContent,/当前为高峰期/);
+  p.elements.get('peak-status').value='no';p.elements.get('peak-status').events.change();
+  assert.match(p.elements.get('peak-clock').textContent,/手动选择：非高峰期/);
+});
+
+test('路线仅检查当前受限点位，全部可通行时仍请求普通路线且允许原探头位置作为端点',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  p.elements.get('route-origin').value='116.3,39.9';p.elements.get('route-destination').value='116.5,39.9';
+  p.elements.get('permit-status').value='outer';p.elements.get('peak-status').value='no';
+  vm.runInContext("routeEnabled=true;cameras=[{category:'6',lng:116.3,lat:39.9},{category:'1',lng:116.4,lat:39.9}]",p.context);
+  const bodies=[];
+  p.context.fetch=async(url,options)=>{bodies.push(JSON.parse(options.body));return {ok:true,json:async()=>({route:{paths:[[[116.3,39.9],[116.5,39.9]]],distance:18000,duration:1200}})};};
+  await p.client.planRoute();
+  assert.equal(bodies.length,1);assert.equal(bodies[0].polygons.length,0);
+  assert.equal(vm.runInContext('routePlan.cameras.length',p.context),0);
+  assert.equal(vm.runInContext('routePlan.reason',p.context),'success');
+  p.elements.get('peak-status').value='yes';p.elements.get('peak-status').events.change();
+  await p.client.planRoute();
+  assert.equal(vm.runInContext('routePlan.cameras.length',p.context),1);
+  assert.equal(vm.runInContext('routePlan.cameras[0].category',p.context),'1');
+});
+
+test('自动跨高峰边界期间的旧规划响应不得画出路线',async()=>{
+  const p=page({proxy:true});await p.client.loadMap();
+  p.elements.get('route-origin').value='116.3,39.9';p.elements.get('route-destination').value='116.5,39.9';
+  p.elements.get('permit-status').value='inner';p.elements.get('peak-status').value='auto';
+  vm.runInContext("routeEnabled=true;cameras=[{category:'1',lng:116.4,lat:39.9}];peakRestrictedAt=()=>false;lastAutoPeakStatus='no'",p.context);
+  let release;
+  p.context.fetch=async()=>{await new Promise(r=>release=r);return {ok:true,json:async()=>({route:{paths:[[[116.3,39.9],[116.5,39.9]]],distance:18000,duration:1200}})};};
+  const pending=p.client.planRoute();
+  assert.equal(p.elements.get('permit-status').disabled,true);
+  vm.runInContext('peakRestrictedAt=()=>true;updatePeakClock()',p.context);
+  release();await pending;
+  assert.equal(vm.runInContext('routeOverlays.length',p.context),0);
+  assert.match(p.elements.get('route-status').textContent,/通行条件已改变/);
+  assert.equal(p.elements.get('permit-status').disabled,false);
+});

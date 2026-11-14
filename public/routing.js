@@ -32,9 +32,9 @@ export function avoidBox(c) {
   return [[c.lng-dx,c.lat-dy],[c.lng+dx,c.lat-dy],[c.lng+dx,c.lat+dy],[c.lng-dx,c.lat+dy]]
     .map(p=>p.map(n=>Number(n.toFixed(6))));
 }
-export function createPlan(origin, destination, cameras, maxRegions = 32) {
+export function createPlan(origin, destination, cameras, maxRegions = 32, {allowEmpty = false} = {}) {
   if (!valid(origin) || !valid(destination)) throw Error('起终点坐标无效。');
-  if (!cameras.length || cameras.some(c=>!valid(c))) throw Error('探头数据尚未完整加载，请刷新数据后再规划。');
+  if ((!allowEmpty && !cameras.length) || cameras.some(c=>!valid(c))) throw Error('探头数据尚未完整加载，请刷新数据后再规划。');
   if (pointDistance(origin,destination)<5) throw Error('起终点距离过近，请重新选择。');
   if (cameras.some(c=>pointDistance(c,origin)<=BUFFER_METERS || pointDistance(c,destination)<=BUFFER_METERS))
     throw Error('起点或终点位于已知摄像头附近，请调整位置。');

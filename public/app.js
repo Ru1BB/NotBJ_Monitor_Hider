@@ -8,9 +8,64 @@ const appBase = new URL('.', location.href);
 const appUrl = path => new URL(path, appBase).href;
 const SESSION_KEY = 'jingtu.amap.session';
 const JUNCTION_EXPAND_ZOOM = 16;
+// Permit categories follow source aa codes, independently of road/location remarks.
+const PERMIT_TYPES = {
+  inner: {label:'需要六环内进京证', color:'#d94747'},
+  outer: {label:'需要六环外进京证', color:'#3984c6'},
+  peak: {label:'早晚高峰限制进京证', color:'#d98a54'}
+};
+function permitType(camera) {
+  const code = String(camera.category ?? '').trim();
+  return PERMIT_TYPES[code === '6' ? 'outer' : code === '1' ? 'peak' : 'inner'];
+}
+const activeCamera = camera => String(camera.category ?? '').trim() !== '4';
+function peakRestrictedAt(date = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US',{
+    timeZone:'Asia/Shanghai',weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'
+  }).formatToParts(date).map(p=>[p.type,p.value]));
+  const minutes = Number(parts.hour)*60 + Number(parts.minute);
+  return !['Sat','Sun'].includes(parts.weekday) && (minutes>=420 && minutes<540 || minutes>=1020 && minutes<1200);
+}
+function selectedPeakStatus() {
+  const value=$('peak-status').value || 'auto';
+  return value === 'auto' ? (peakRestrictedAt() ? 'yes' : 'no') : value;
+}
+let lastAutoPeakStatus = selectedPeakStatus();
+function updatePeakClock() {
+  const status=selectedPeakStatus();
+  $('peak-clock').textContent=($('peak-status').value || 'auto') === 'auto'
+    ? `自动判断：当前为${status==='yes'?'高峰期':'非高峰期'}（北京时间；按周一至周五，节假日调休请手动修正）`
+    : `手动选择：${status==='yes'?'高峰期':'非高峰期'}`;
+  if(status!==lastAutoPeakStatus) {lastAutoPeakStatus=status;changePassageSettings();}
+}
+function passage(camera) {
+  const permit = $('permit-status').value || 'none';
+  const peak = selectedPeakStatus();
+  const type = permitType(camera);
+  if (type === PERMIT_TYPES.peak) {
+    if (peak === 'yes') return {allowed:false, label:'不可通行：当前为受限高峰时段'};
+    if (!['inner','outer'].includes(permit)) return {allowed:false, label:'不可通行：需要有效进京证'};
+    if (peak !== 'no') return {allowed:false, label:'需确认：是否为受限高峰时段'};
+    return {allowed:true, label:'可通行（按所选证件与时段）'};
+  }
+  const allowed = permit === 'inner' || type === PERMIT_TYPES.outer && permit === 'outer';
+  return {allowed, label:allowed ? '可通行（按所选证件与时段）' : `不可通行：${type.label}`};
+}
+function changePassageSettings() {
+  lastAutoPeakStatus=selectedPeakStatus();
+  cameraVersion++;
+  clearRoute();
+  $('route-status').textContent='进京证或高峰时段已更改，请重新规划路线。';
+  render();
+  const current = cameras.find(c=>c.id===selected);
+  if (current && $('detail').open) paintDetail({...current,distance:center?distance(center,current):0});
+}
+
+
 const roadCache = new Map(), roadPending = new Set();
 let geocoder, roadQueueRunning = false, roadRequests = 0, priorityCamera = null;
 let map, cameraMarkers = [], centerMarker, accuracyCircle, currentPosition, center;
+let cameraDataLoaded = false;
 let cameras = [], visible = [], selected = null, choosing = false, loadingMap = false;
 let activeCode = '', activeKey = '', usesProxy = false;
 let junctionMarkers = [], junctionGroups = [], selectedJunction = null, selectedJunctionMembers = [];
@@ -137,18 +192,20 @@ function drawRoute(plan) {
   map.setFitView([...routeOverlays,...Object.values(routePointMarkers).filter(Boolean)]);
 }
 function routeSummary(plan) {
-  const reasons={endpoint:'起点或终点落入所需避让区域，请调整位置。',success:'已找到避开当前已知摄像头区域的路线。',budget:'已达到本轮规划次数上限，仍未找到符合条件的路线。',time:'已达到本轮时间上限，仍未找到符合条件的路线。',regions:'已达到本站避让区域数量上限，仍未找到符合条件的路线。',unchanged:'路线重复或避让未生效，已停止重算。'};
+  const reasons={endpoint:'起点或终点落入所需避让区域，请调整位置。',success:'已找到通过当前证件与时段下已知受限点位检查的路线。',budget:'已达到本轮规划次数上限，仍未找到符合条件的路线。',time:'已达到本轮时间上限，仍未找到符合条件的路线。',regions:'已达到本站避让区域数量上限，仍未找到符合条件的路线。',unchanged:'路线重复或避让未生效，已停止重算。'};
   return `${reasons[plan.reason]} 累计发起 ${plan.calls} 次高德请求，复用 ${plan.cacheHits} 次缓存或并发结果；已累积 ${plan.areas.size} / ${plan.maxRegions} 个避让区域。${plan.route && plan.reason==='success'?` 路程 ${(plan.route.distance/1000).toFixed(1)} 公里，预计 ${Math.ceil(plan.route.duration/60)} 分钟。`:''}${plan.hits.length?` 最后一次检查仍接近 ${plan.hits.length} 条已知点位记录，未显示该路线。`:''}`;
 }
 async function planRoute(continuing = false) {
   if(routeBusy) return;
+  updatePeakClock();
   if(!map || !routeEnabled) { reportRoute('请先加载地图；站点须配置高德 Web 服务 Key 才能规划路线。');return; }
-  if(!cameras.length) { reportRoute('探头数据未加载，请在设置中刷新后再试。');return; }
+  if(!cameraDataLoaded && !cameras.length) { reportRoute('探头数据未加载，请在设置中刷新后再试。');return; }
   try {
     const origin=routePoint('origin'), destination=routePoint('destination');
     for(const which of ['origin','destination']) showRoutePointMarker(which);
     if(!continuing || !routePlan || routeVersion!==cameraVersion || JSON.stringify(origin)!==JSON.stringify(routePlan.origin) || JSON.stringify(destination)!==JSON.stringify(routePlan.destination)) {
-      clearRoute(); routePlan=createPlan(origin,destination,cameras,routeMaxRegions); routeVersion=cameraVersion;
+      clearRoute(); routePlan=createPlan(origin,destination,cameras.filter(c=>!passage(c).allowed),routeMaxRegions,{allowEmpty:true}); routeVersion=cameraVersion;
+      routePlan.passageKey=($('permit-status').value || 'none')+':'+selectedPeakStatus();
     }
     if(continuing && !routePlan.resumable) return;
     const plan=routePlan;
@@ -156,14 +213,14 @@ async function planRoute(continuing = false) {
     for(const which of ['origin','destination']) cancelPlaceSearch(which);
     routeBusy=true; routePick=''; choosing=false; $('map-instruction').hidden=true;
     $('route-continue').hidden=true;
-    for(const id of ['route-start','route-location-origin','route-location-destination','route-current','route-pick-origin','route-pick-destination','route-clear','route-origin','route-destination','refresh']) $(id).disabled=true;
+    for(const id of ['route-start','route-location-origin','route-location-destination','route-current','route-pick-origin','route-pick-destination','route-clear','route-origin','route-destination','refresh','permit-status','peak-status']) $(id).disabled=true;
     await runPlan(plan,async input=>{
       const response=await fetch(appUrl('api/route'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input),cache:'no-store',signal:AbortSignal.timeout(15000)});
       const result=await response.json();
       if(!response.ok) throw Error(result.error || '路线规划失败，请稍后重试。');
       return result;
     },p=>{reportRoute(`正在规划与本地检查… 已发起 ${p.calls} 次高德请求，复用 ${p.cacheHits} 次；累积 ${p.areas.size} 个避让区域。`,'pending');});
-    if(routeVersion!==cameraVersion) {clearRoute();reportRoute('规划期间探头数据已更新，请重新规划。');return;}
+    if(routeVersion!==cameraVersion || plan.passageKey!==($('permit-status').value || 'none')+':'+selectedPeakStatus()) {clearRoute();reportRoute('规划期间探头数据已更新或通行条件已改变，请重新规划。');return;}
     drawRoute(plan);
     reportRoute(routeSummary(plan),plan.reason==='success'?'success':'failure');
     $('route-continue').hidden=!plan.resumable;
@@ -173,7 +230,7 @@ async function planRoute(continuing = false) {
     reportRoute(`${e.message} 本次未取得通过避让检查的路线。`);
   } finally {
     routeBusy=false;
-    for(const id of ['route-start','route-location-origin','route-location-destination','route-current','route-pick-origin','route-pick-destination','route-clear','route-origin','route-destination','refresh']) $(id).disabled=false;
+    for(const id of ['route-start','route-location-origin','route-location-destination','route-current','route-pick-origin','route-pick-destination','route-clear','route-origin','route-destination','refresh','permit-status','peak-status']) $(id).disabled=false;
   }
 }
 function pickRoutePoint(which) {
@@ -221,7 +278,7 @@ function paintDetail(camera) {
   const nearby = road.nearbyRoads.map(r => `${r.name} · 约 ${Math.round(r.distance)} 米${r.direction ? ' · ' + r.direction : ''}`).join('\n');
   const amapState = road.amapStatus || (roadRequests >= 100 ? '本页辅助查询已达 100 次上限，请刷新后再查' : '等待高德辅助查询');
   const fields = [
-    ['位置 / 方向',camera.description], ['直线距离',formatDistance(camera.distance)],
+    ['当前通行判断',passage(camera).label], ['进京证分类',permitType(camera).label], ['位置 / 方向',camera.description], ['直线距离',formatDistance(camera.distance)],
     ['主辅路判断',roadLabel(road) + ' · ' + road.reason], ['高架 / 地面',road.level],
     ['高德辅助信息',amapState], ['高德附近道路',nearby],
     ['高德附近路口',road.crossings.join('\n')], ['高德地址',road.address]
@@ -251,7 +308,7 @@ function showJunctionDetail(group) {
     + '<p>以下保留每条来源记录；数量不代表已核实的独立设备数。点击可查看通行方向、道路分类和来源详情。</p>';
   for (const camera of group.members) {
     const button = document.createElement('button'); button.className = 'junction-member';
-    button.innerHTML = `<b>${escapeHtml(camera.side === '待确认' ? '方位待确认' : camera.side + '侧')} · 距路口 ${Math.round(camera.junctionDistance)} 米</b><span>${escapeHtml(camera.name)}</span>`;
+    button.innerHTML = `<b>${escapeHtml(camera.side === '待确认' ? '方位待确认' : camera.side + '侧')} · 距路口 ${Math.round(camera.junctionDistance)} 米</b><span>${escapeHtml(camera.name)} · ${escapeHtml(permitType(camera).label)} · ${escapeHtml(passage(camera).label)}</span>`;
     button.addEventListener('click', () => showDetail(camera));
     $('detail-body').append(button);
   }
@@ -272,7 +329,7 @@ function renderList() {
   }
   visible.forEach((camera,index)=>{
     const item=document.createElement('button'); item.className='item'+(camera.id===selected?' active':'');
-    item.innerHTML=`<span class="item-index">${String(index+1).padStart(2,'0')}</span><span class="item-main"><b>${escapeHtml(camera.name)}</b><small>${escapeHtml(roadLabel(camera.road))}</small></span><span class="item-distance">${formatDistance(camera.distance)} ›</span>`;
+    item.innerHTML=`<span class="item-index">${String(index+1).padStart(2,'0')}</span><span class="item-main"><b>${escapeHtml(camera.name)}</b><small>${escapeHtml(permitType(camera).label)} · ${escapeHtml(roadLabel(camera.road))}</small><small class="passage-status ${passage(camera).allowed?'allowed':'blocked'}">${escapeHtml(passage(camera).label)}</small></span><span class="item-distance">${formatDistance(camera.distance)} ›</span>`;
     item.addEventListener('click',()=>{ if(map) map.panTo([camera.lng,camera.lat]); showDetail(camera); }); list.append(item);
   });
 }
@@ -310,11 +367,11 @@ function renderMapMarkers() {
     else { selectedJunction = null; $('detail').close(); }
   }
   for (const camera of expanded ? visible : grouped.singles) {
-    const color={major:'#d94747',other:'#d98a54',unknown:'#829188'}[camera.road.kind] || '#829188';
+    const color=permitType(camera).color;
     const el=document.createElement('button'); el.className='camera-marker';
-    const title = `${camera.name}，${roadLabel(camera.road)}`;
+    const title = `${camera.name}，${permitType(camera).label}，${passage(camera).label}，${roadLabel(camera.road)}`;
     el.title=title; el.setAttribute('aria-label',title);
-    el.innerHTML=`<span class="camera-dot" style="background:${color}" aria-hidden="true"></span>`;
+    el.innerHTML=`<span class="camera-dot" style="background:${color};${passage(camera).allowed?'box-shadow:0 0 0 3px #2b884b':''}" aria-hidden="true"></span>`;
     el.addEventListener('click',event=>{event.stopPropagation();showDetail(camera);});
     cameraMarkers.push(new AMap.Marker({position:[camera.lng,camera.lat],map,content:el,offset:new AMap.Pixel(-12,-12),zIndex:130,title}));
   }
@@ -411,6 +468,7 @@ function locate() {
 }
 // Browsers may suspend location in the background; request a fresh watch on return.
 document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) updatePeakClock();
   if (!following) return;
   if (document.hidden) stopLocationWatch();
   else locate();
@@ -489,7 +547,8 @@ async function loadData(refresh=false) {
     const response=await fetch(appUrl(refresh?'api/cameras/refresh':'api/cameras'),{method:refresh?'POST':'GET',cache:'no-store'});
     const data=await response.json();
     if(!response.ok && !data.fetchedAt) throw Error(data.warning || '数据加载失败，请稍后刷新重试。');
-    cameras=data.cameras;
+    cameras=data.cameras.filter(activeCamera);
+    cameraDataLoaded=true;
     cameraVersion++;
     if(routePlan && !routeBusy) { clearRoute(); $('route-status').textContent='探头数据已更新，请重新规划路线。'; }
     $('data-time').textContent=`应用获取时间：${new Date(data.fetchedAt).toLocaleString('zh-CN')}${data.stale?'（旧缓存）':''}`;
@@ -525,6 +584,9 @@ for(const which of ['origin','destination']) {
 }
 $('route-current').addEventListener('click',()=>{if(!center){$('route-status').textContent='请先定位或选择查询中心。';return;}setRoutePoint('origin',center);});
 $('junction-enabled').addEventListener('change',render);
+for(const id of ['permit-status','peak-status']) $(id).addEventListener('change',()=>{changePassageSettings();updatePeakClock();});
+updatePeakClock();
+setInterval(updatePeakClock,15000);
 $('refresh').addEventListener('click',()=>loadData(true));
 $('locate').addEventListener('click',locate);
 $('recenter').addEventListener('click',locate);
